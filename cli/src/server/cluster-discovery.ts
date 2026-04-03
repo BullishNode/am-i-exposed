@@ -12,6 +12,9 @@ import {
   type StoredAddressEntity,
 } from "../adapters/entity-store";
 
+/** Maximum cluster size for auto-discovery. Larger clusters are reported but not persisted. */
+const MAX_DISCOVERY_CLUSTER_SIZE = 500;
+
 export interface ClusterDiscovery {
   entityName: string;
   entityId: number;
@@ -20,11 +23,16 @@ export interface ClusterDiscovery {
   discoveredAddresses: string[];
   clusterSize: number;
   method: "cioh";
+  persisted: boolean;
 }
 
 /**
  * Cross-reference cluster addresses with entity store.
  * Auto-persists newly discovered addresses to their entities.
+ *
+ * When multiple entities exist in the same cluster, untagged addresses
+ * are assigned to the entity with the most known addresses in the cluster
+ * (strongest signal). Other entities get a report but no new addresses.
  */
 export function discoverClusterEntities(
   clusterAddresses: Set<string>,
@@ -48,34 +56,48 @@ export function discoverClusterEntities(
     }
   }
 
-  // 3. For each entity: find cluster addresses NOT already tagged
+  // 3. Collect untagged addresses (not belonging to ANY entity)
+  const untagged: string[] = [];
+  for (const addr of addrArray) {
+    if (!entityHits.has(addr)) {
+      untagged.push(addr);
+    }
+  }
+
+  // 4. Determine which entity gets the untagged addresses:
+  //    the one with the most known addresses in the cluster (strongest signal)
+  let primaryEntityId: number | null = null;
+  let primaryCount = 0;
+  for (const [entityId, { knownAddresses }] of byEntity) {
+    if (knownAddresses.length > primaryCount) {
+      primaryCount = knownAddresses.length;
+      primaryEntityId = entityId;
+    }
+  }
+
+  // 5. Build discoveries
   const discoveries: ClusterDiscovery[] = [];
+  const tooLarge = clusterAddresses.size > MAX_DISCOVERY_CLUSTER_SIZE;
 
   for (const [entityId, { entity, knownAddresses }] of byEntity) {
-    const knownSet = new Set(knownAddresses);
-    const discovered: string[] = [];
+    const isPrimary = entityId === primaryEntityId;
+    const discovered = isPrimary ? untagged : [];
+    const shouldPersist = isPrimary && discovered.length > 0 && !tooLarge;
 
-    for (const addr of addrArray) {
-      // Skip addresses already belonging to ANY entity (don't steal from other entities)
-      if (entityHits.has(addr)) continue;
-      if (knownSet.has(addr)) continue;
-      discovered.push(addr);
+    if (shouldPersist) {
+      addAddressesToEntity(entityId, discovered, "auto-discovered");
     }
 
-    if (discovered.length > 0) {
-      // 4. Auto-persist discovered addresses to this entity
-      addAddressesToEntity(entityId, discovered);
-
-      discoveries.push({
-        entityName: entity.entityName,
-        entityId,
-        category: entity.category,
-        knownAddresses,
-        discoveredAddresses: discovered,
-        clusterSize: clusterAddresses.size,
-        method: "cioh",
-      });
-    }
+    discoveries.push({
+      entityName: entity.entityName,
+      entityId,
+      category: entity.category,
+      knownAddresses,
+      discoveredAddresses: discovered,
+      clusterSize: clusterAddresses.size,
+      method: "cioh",
+      persisted: shouldPersist,
+    });
   }
 
   return discoveries;

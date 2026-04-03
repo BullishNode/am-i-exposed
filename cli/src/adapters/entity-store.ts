@@ -201,17 +201,18 @@ export function entityAddressCount(id: number): number {
 export function addAddressesToEntity(
   entityId: number,
   addresses: string[],
+  source = "api",
 ): number {
   const d = getDb();
   if (!d || addresses.length === 0) return 0;
   const now = Date.now();
   const stmt = d.prepare(
-    "INSERT OR REPLACE INTO entity_addresses (address, entity_id, source, created_at) VALUES (?, ?, 'api', ?)",
+    "INSERT OR REPLACE INTO entity_addresses (address, entity_id, source, created_at) VALUES (?, ?, ?, ?)",
   );
   let count = 0;
   const tx = d.transaction(() => {
     for (const addr of addresses) {
-      stmt.run(addr, entityId, now);
+      stmt.run(addr, entityId, source, now);
       count++;
     }
   });
