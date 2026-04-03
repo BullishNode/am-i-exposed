@@ -7,7 +7,7 @@ import { parseJsonBody, sendJson, sendError } from "../router";
 import {
   createEntity, getEntity, listEntities, updateEntity, deleteEntity,
   entityAddressCount, addAddressesToEntity, listEntityAddresses,
-  removeAddressFromEntity,
+  removeAddressFromEntity, getAllEntityAddresses,
 } from "../../adapters/entity-store";
 
 /** POST /api/v1/entities */
@@ -107,4 +107,14 @@ export async function handleRemoveAddress(_req: IncomingMessage, res: ServerResp
   if (!id || isNaN(id)) { sendError(res, 400, "Invalid entity ID"); return; }
   const removed = removeAddressFromEntity(id, params.addr);
   sendJson(res, 200, { removed });
+}
+
+/** GET /api/v1/entities/addresses/all — compact dump for client-side entity matching */
+export async function handleAllEntityAddresses(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const all = getAllEntityAddresses();
+  const data: Record<string, { entityName: string; category: string }> = {};
+  for (const [addr, info] of all) {
+    data[addr] = info;
+  }
+  sendJson(res, 200, { count: all.size, addresses: data });
 }

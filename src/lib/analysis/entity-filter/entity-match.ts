@@ -83,8 +83,27 @@ export async function matchEntities(
 }
 
 /**
+ * Optional supplementary entity checker.
+ * When set, matchEntitySync checks this source in addition to OFAC and the binary filter.
+ * Used to integrate custom entity stores (e.g., SQLite-backed entities loaded via API).
+ */
+let supplementaryChecker: ((address: string) => EntityMatch | null) | null = null;
+
+/**
+ * Register a supplementary entity checker that runs alongside the built-in filter.
+ * Pass null to clear. The checker is called after OFAC but before the binary filter,
+ * so custom entities take precedence over Bloom filter matches.
+ */
+export function setSupplementaryEntityChecker(
+  checker: ((address: string) => EntityMatch | null) | null,
+): void {
+  supplementaryChecker = checker;
+}
+
+/**
  * Check a single address against entity databases.
  * Synchronous version that only checks already-loaded data (OFAC + filter if loaded).
+ * Also checks the supplementary checker if registered.
  */
 export function matchEntitySync(address: string): EntityMatch | null {
   // OFAC check (always available)
@@ -100,6 +119,12 @@ export function matchEntitySync(address: string): EntityMatch | null {
       ofac: true,
       confidence: "high",
     };
+  }
+
+  // Supplementary checker (custom entities from API/SQLite)
+  if (supplementaryChecker) {
+    const match = supplementaryChecker(address);
+    if (match) return match;
   }
 
   // Entity filter (only if already loaded)

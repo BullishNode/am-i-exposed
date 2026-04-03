@@ -14,6 +14,7 @@ import {
   handleCreateEntity, handleListEntities, handleGetEntity,
   handleUpdateEntity, handleDeleteEntity,
   handleAddAddresses, handleListAddresses, handleRemoveAddress,
+  handleAllEntityAddresses,
 } from "./handlers/entities";
 import {
   handleGetAddress, handleSetAddressLabel, handleDeleteAddressLabel,
@@ -23,7 +24,8 @@ import {
   handleGetTransactionLabel, handleSetTransactionLabel,
   handleDeleteTransactionLabel, handleLookupTransactions,
 } from "./handlers/transactions";
-import { entityStoreStats } from "../adapters/entity-store";
+import { entityStoreStats, lookupAddressEntity } from "../adapters/entity-store";
+import { setSupplementaryEntityChecker } from "@/lib/analysis/entity-filter/entity-match";
 import type { GlobalOpts } from "../index";
 
 export async function startApiServer(opts: GlobalOpts): Promise<void> {
@@ -50,6 +52,23 @@ export async function startApiServer(opts: GlobalOpts): Promise<void> {
   const stats = entityStoreStats();
   console.log(`Entity store: ${stats.entities} entities, ${stats.addresses} addresses, ${stats.addressLabels} address labels, ${stats.transactionLabels} tx labels.`);
 
+  // Register custom entity checker so matchEntitySync() also checks our SQLite store.
+  // This makes custom entities appear everywhere: graph nodes, entity detection, findings.
+  if (stats.addresses > 0) {
+    setSupplementaryEntityChecker((address: string) => {
+      const hit = lookupAddressEntity(address);
+      if (!hit) return null;
+      return {
+        address,
+        entityName: hit.entityName,
+        category: hit.category as import("@/lib/analysis/entities").EntityCategory,
+        ofac: false,
+        confidence: "high" as const,
+      };
+    });
+    console.log("Custom entity checker registered.");
+  }
+
   // Register routes
   clearRoutes();
 
@@ -58,9 +77,10 @@ export async function startApiServer(opts: GlobalOpts): Promise<void> {
   addRoute("POST", "/api/v1/scan/tx", handleScanTx);
   addRoute("POST", "/api/v1/chain-trace", handleChainTrace);
 
-  // Entities
+  // Entities (static paths before :id to avoid pattern conflict)
   addRoute("POST", "/api/v1/entities", handleCreateEntity);
   addRoute("GET", "/api/v1/entities", handleListEntities);
+  addRoute("GET", "/api/v1/entities/addresses/all", handleAllEntityAddresses);
   addRoute("GET", "/api/v1/entities/:id", handleGetEntity);
   addRoute("PUT", "/api/v1/entities/:id", handleUpdateEntity);
   addRoute("DELETE", "/api/v1/entities/:id", handleDeleteEntity);

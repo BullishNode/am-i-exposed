@@ -370,6 +370,20 @@ export function entityStoreStats(): {
   return { entities: e.cnt, addresses: a.cnt, addressLabels: al.cnt, transactionLabels: tl.cnt };
 }
 
+/** Return all entity-address mappings as a compact map: address → {entityName, category}. */
+export function getAllEntityAddresses(): Map<string, { entityName: string; category: string }> {
+  const d = getDb();
+  const result = new Map<string, { entityName: string; category: string }>();
+  if (!d) return result;
+  const rows = d.prepare(
+    "SELECT ea.address, e.name as entity_name, e.category FROM entity_addresses ea JOIN entities e ON ea.entity_id = e.id",
+  ).all() as Array<{ address: string; entity_name: string; category: string }>;
+  for (const r of rows) {
+    result.set(r.address, { entityName: r.entity_name, category: r.category });
+  }
+  return result;
+}
+
 export function closeEntityStore(): void {
   if (db) { db.close(); db = null; }
 }

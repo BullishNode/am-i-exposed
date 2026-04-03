@@ -1,4 +1,4 @@
-export { matchEntitySync, detectEntityBehavior } from "./entity-match";
+export { matchEntitySync, detectEntityBehavior, setSupplementaryEntityChecker } from "./entity-match";
 export {
   configureDataLoader,
   loadEntityFilter,
