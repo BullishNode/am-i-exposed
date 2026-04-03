@@ -77,17 +77,17 @@ export async function importEntities(opts?: { force?: boolean }): Promise<void> 
     return;
   }
 
-  // Check if already imported
-  const stats = entityStoreStats();
-  if (stats.entities > 0 && !opts?.force) {
-    console.log(`  Entity store already has ${stats.entities} entities, ${stats.addresses} addresses. Use --reimport-entities to force.`);
-    return;
-  }
-
   console.log("  Loading entity definitions...");
   const entitiesJson = JSON.parse(readFileSync(entitiesPath, "utf-8"));
   const entityDefs: EntityDef[] = entitiesJson.entities;
   console.log(`  Found ${entityDefs.length} entity definitions.`);
+
+  // Skip if built-in entities already imported (custom entities via API don't block this)
+  const stats = entityStoreStats();
+  if (stats.entities >= entityDefs.length && !opts?.force) {
+    console.log(`  Already imported (${stats.entities} entities, ${stats.addresses} addresses). Use --reimport-entities to force.`);
+    return;
+  }
 
   // Build lookup: lowercase name → entity id
   const entityIdMap = new Map<string, number>();
@@ -131,7 +131,8 @@ export async function importEntities(opts?: { force?: boolean }): Promise<void> 
     .filter((d) => existsSync(d));
 
   let totalAddresses = 0;
-  let totalErrors = 0;
+  let totalSkipped = 0;
+  let totalInvalid = 0;
   let totalFiles = 0;
 
   for (const dir of csvDirs) {
@@ -143,7 +144,8 @@ export async function importEntities(opts?: { force?: boolean }): Promise<void> 
       const filePath = join(dir, file);
       const result = await importCsvFile(filePath, entityIdMap, nameLookup);
       totalAddresses += result.imported;
-      totalErrors += result.errors;
+      totalSkipped += result.skipped;
+      totalInvalid += result.invalid;
       totalFiles++;
       if (result.imported > 0) {
         process.stdout.write(`    ${file}: ${result.imported} addresses\n`);
@@ -152,7 +154,9 @@ export async function importEntities(opts?: { force?: boolean }): Promise<void> 
   }
 
   const finalStats = entityStoreStats();
-  console.log(`  Import complete: ${totalFiles} files, ${totalAddresses} addresses imported, ${totalErrors} errors.`);
+  console.log(`  Import complete: ${totalFiles} files, ${totalAddresses} addresses imported.`);
+  if (totalSkipped > 0) console.log(`  Skipped ${totalSkipped} addresses (entity not in entities.json).`);
+  if (totalInvalid > 0) console.log(`  Invalid ${totalInvalid} lines (bad format or address).`);
   console.log(`  Entity store: ${finalStats.entities} entities, ${finalStats.addresses} addresses.`);
 }
 
@@ -164,16 +168,18 @@ async function importCsvFile(
   filePath: string,
   entityIdMap: Map<string, number>,
   nameLookup: Map<string, string>,
-): Promise<{ imported: number; errors: number }> {
+): Promise<{ imported: number; skipped: number; invalid: number }> {
   let addrIdx = 0;
   let entityIdx = 1;
   let headerDetected = false;
   let imported = 0;
-  let errors = 0;
+  let skipped = 0;  // entity not in entities.json
+  let invalid = 0;  // bad format or missing fields
 
-  // Batch for performance
+  // Batch for performance — track total incrementally
   const BATCH_SIZE = 5000;
-  const batch = new Map<number, string[]>(); // entityId → addresses
+  const batch = new Map<number, string[]>();
+  let batchTotal = 0;
 
   function flushBatch(): void {
     for (const [eid, addrs] of batch) {
@@ -181,6 +187,7 @@ async function importCsvFile(
       imported += addrs.length;
     }
     batch.clear();
+    batchTotal = 0;
   }
 
   const rl = createInterface({
@@ -212,27 +219,24 @@ async function importCsvFile(
         );
         if (addrIdx < 0) addrIdx = 0;
         if (entityIdx < 0) entityIdx = 1;
-        continue; // skip header row
+        continue;
       }
     }
 
     // Extract and validate address
     const rawAddr = parts[addrIdx];
-    if (!rawAddr) { errors++; continue; }
+    if (!rawAddr) { invalid++; continue; }
     const addr = normalizeAddress(rawAddr);
-    if (!isValidAddress(addr)) { errors++; continue; }
+    if (!isValidAddress(addr)) { invalid++; continue; }
 
     // Extract and resolve entity name
     const rawEntity = parts[entityIdx];
-    if (!rawEntity) { errors++; continue; }
+    if (!rawEntity) { invalid++; continue; }
 
     const canonicalName = resolveEntityName(rawEntity, nameLookup);
-    if (!canonicalName) { errors++; continue; }
-
-    const entityId = entityIdMap.get(canonicalName.toLowerCase());
+    const entityId = canonicalName ? entityIdMap.get(canonicalName.toLowerCase()) : undefined;
     if (!entityId) {
-      // Entity not in entities.json — skip
-      errors++;
+      skipped++;
       continue;
     }
 
@@ -243,17 +247,13 @@ async function importCsvFile(
     } else {
       batch.set(entityId, [addr]);
     }
+    batchTotal++;
 
-    // Flush batch when any entity accumulates enough
-    let batchTotal = 0;
-    for (const addrs of batch.values()) batchTotal += addrs.length;
     if (batchTotal >= BATCH_SIZE) flushBatch();
   }
 
-  // Flush remaining
   flushBatch();
-
-  return { imported, errors };
+  return { imported, skipped, invalid };
 }
 
 /** Resolve a raw CSV entity name to the canonical name from entities.json. */

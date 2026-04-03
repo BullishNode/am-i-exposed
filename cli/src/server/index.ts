@@ -38,10 +38,12 @@ export async function startApiServer(opts: GlobalOpts): Promise<void> {
   }
 
   // Import entities from CSV data sources (optional)
-  if (opts.importEntities || opts["import-entities"]) {
+  const shouldReimport = !!(opts.reimportEntities || opts["reimport-entities"]);
+  const shouldImport = !!(opts.importEntities || opts["import-entities"]) || shouldReimport;
+  if (shouldImport) {
     console.log("Importing entity data from CSV sources...");
     const { importEntities } = await import("./import-entities");
-    await importEntities({ force: !!(opts.reimportEntities || opts["reimport-entities"]) });
+    await importEntities({ force: shouldReimport });
   }
 
   // Entity store stats
