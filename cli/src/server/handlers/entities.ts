@@ -21,6 +21,10 @@ export async function handleCreateEntity(req: IncomingMessage, res: ServerRespon
     sendError(res, 400, "At least one address is required");
     return;
   }
+  if (body.addresses.length > 10000) {
+    sendError(res, 400, "Maximum 10,000 addresses per request");
+    return;
+  }
   try {
     const entity = createEntity(body.name, body.category, body.description);
     if (!entity) { sendError(res, 500, "Failed to create entity"); return; }
@@ -79,6 +83,10 @@ export async function handleAddAddresses(req: IncomingMessage, res: ServerRespon
   const body = (await parseJsonBody(req)) as { addresses?: string[] } | null;
   if (!body?.addresses || !Array.isArray(body.addresses) || body.addresses.length === 0) {
     sendError(res, 400, "Required field: addresses (non-empty string array)");
+    return;
+  }
+  if (body.addresses.length > 10000) {
+    sendError(res, 400, "Maximum 10,000 addresses per request");
     return;
   }
   const count = addAddressesToEntity(id, body.addresses);

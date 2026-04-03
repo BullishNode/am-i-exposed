@@ -5,58 +5,44 @@ REST API for programmatic access to the am-i-exposed Bitcoin privacy analysis en
 ## Quick Start
 
 ```bash
-# Start the server
-am-i-exposed serve --port 3001 --api https://mempool.space/api
+am-i-exposed serve --port 3001
 
-# With self-hosted mempool (recommended for production)
-am-i-exposed serve --port 3001 --api http://your-mempool:8999/api
+# With entity import and auth
+am-i-exposed serve --port 3001 --import-entities --auth-token <secret>
+
+# Full server mode with self-hosted mempool
+am-i-exposed serve --port 3001 --import-entities --auth-token <secret> --api http://your-mempool:8999/api
 ```
-
-**Options:**
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--port <N>` | 3001 | Port to listen on |
 | `--host <addr>` | 127.0.0.1 | Bind address |
 | `--api <url>` | mempool.space | Custom mempool API URL |
-| `--no-entities` | false | Skip entity filter loading (faster startup) |
+| `--auth-token <token>` | none | Require Bearer token for all requests (except health) |
+| `--import-entities` | off | Import entity data from CSV sources into SQLite on startup |
+| `--reimport-entities` | off | Force re-import (implies --import-entities) |
+| `--no-entities` | false | Skip built-in entity filter loading |
 | `--no-cache` | false | Disable SQLite response caching |
 
-**CORS:** Enabled for all origins. Methods: GET, POST, DELETE, OPTIONS.
+**Auth:** When `--auth-token` is set, all requests except `GET /api/v1/health` must include `Authorization: Bearer <token>`.
 
-**Max request body:** 10 MB.
+**CORS:** All origins allowed. Methods: GET, POST, PUT, DELETE, OPTIONS. Headers: Content-Type, Authorization.
 
----
-
-## Endpoints
-
-### GET /api/v1/health
-
-Server status and diagnostics.
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "version": "0.35.6",
-  "entityFilter": {
-    "status": "ready",
-    "fullLoaded": true
-  },
-  "labelProviders": 3
-}
-```
+**Max request body:** 10 MB. Max addresses per request: 10,000.
 
 ---
+
+## Analysis Endpoints
 
 ### POST /api/v1/scan/tx
 
-Analyze a Bitcoin transaction for privacy exposure. Runs 27 heuristics, optional chain tracing up to N hops, and returns entity detection with three-dimension relatedness data.
+Analyze a Bitcoin transaction. Runs 27 privacy heuristics, optional chain tracing, and returns entities/labels found in the chain.
 
 **Request:**
 ```json
 {
-  "txid": "0b6461de422c46a221db99608fcbe0326e4f2325ebf2a47c9faf660ed61ee6a4",
+  "txid": "64-char hex",
   "network": "mainnet",
   "chainDepth": 6,
   "minSats": 1000,
@@ -65,14 +51,14 @@ Analyze a Bitcoin transaction for privacy exposure. Runs 27 heuristics, optional
 }
 ```
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| txid | string | Yes | - | 64-character hex transaction ID |
-| network | string | No | "mainnet" | "mainnet", "testnet4", or "signet" |
-| chainDepth | number | No | 6 | Hops to trace (0-20). 0 = tx-only analysis |
-| minSats | number | No | 1000 | Minimum sats to follow when tracing (filters dust) |
-| fast | boolean | No | false | Skip parent tx fetching for faster analysis |
-| apiUrl | string | No | - | Override mempool API URL for this request |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| txid | string | required | 64-character hex transaction ID |
+| network | string | mainnet | mainnet, testnet4, or signet |
+| chainDepth | number | 6 | Hops to trace (0-20) |
+| minSats | number | 1000 | Min sats to follow when tracing |
+| fast | boolean | false | Skip parent tx context |
+| apiUrl | string | - | Override mempool API URL |
 
 **Response:**
 ```json
@@ -81,465 +67,227 @@ Analyze a Bitcoin transaction for privacy exposure. Runs 27 heuristics, optional
   "grade": "C",
   "txType": "simple-payment",
   "txInfo": {
-    "inputs": 1,
-    "outputs": 2,
-    "fee": 10000,
-    "size": 226,
-    "weight": 904,
-    "confirmed": true,
-    "blockHeight": 399996
+    "inputs": 1, "outputs": 2, "fee": 10000,
+    "size": 226, "weight": 904,
+    "confirmed": true, "blockHeight": 399996
   },
   "findings": [
-    {
-      "id": "h2-change-detected",
-      "severity": "high",
-      "confidence": "high",
-      "title": "Change output likely identifiable (medium confidence)",
-      "description": "3 sub-heuristics point to a likely change output...",
-      "recommendation": "Use wallets with change output randomization...",
-      "scoreImpact": -16,
-      "params": {
-        "signalCount": 3,
-        "confidence": "medium",
-        "changeIndex": 1
-      }
-    }
+    {"id": "h2-change-detected", "severity": "high", "scoreImpact": -16, "title": "..."}
   ],
-  "recommendation": {
-    "id": "use-coinjoin",
-    "urgency": "immediate",
-    "headline": "Use CoinJoin to break the on-chain trail"
-  },
+  "recommendation": {"id": "use-coinjoin", "urgency": "immediate", "headline": "..."},
   "chainAnalysis": {
-    "backward": {
-      "depth": 6,
-      "txsFetched": 47,
-      "aborted": false,
-      "layers": [
-        { "depth": 1, "txCount": 1 },
-        { "depth": 2, "txCount": 3 }
-      ]
-    },
-    "forward": {
-      "depth": 6,
-      "txsFetched": 32,
-      "aborted": false,
-      "layers": [
-        { "depth": 1, "txCount": 2 },
-        { "depth": 2, "txCount": 8 }
-      ]
-    },
-    "findings": [
-      {
-        "id": "chain-entity-proximity-backward",
-        "severity": "high",
-        "title": "2 hops from Binance (exchange)",
-        "scoreImpact": -4
-      }
-    ]
+    "backward": {"depth": 6, "txsFetched": 47, "aborted": false, "layers": [...]},
+    "forward": {"depth": 6, "txsFetched": 32, "aborted": false, "layers": [...]}
   },
-  "entities": [
-    {
-      "entityName": "Binance",
-      "category": "exchange",
-      "address": "bc1q...",
-      "txid": "abc123...",
-      "direction": "backward",
-      "origin": "builtin",
-      "hops": 2,
-      "taintFraction": 0.42,
-      "onPeelChain": true,
-      "peelChainConfidence": 0.78,
-      "ofac": false,
-      "coinJoinBarrier": false,
-      "coinJoinBarrierCount": 0
-    },
-    {
-      "entityName": "Bull Bitcoin",
-      "category": "internal",
-      "address": "bc1q...",
-      "txid": "def456...",
-      "direction": "forward",
-      "origin": "custom",
-      "hops": 1,
-      "taintFraction": null,
-      "onPeelChain": false,
-      "peelChainConfidence": null,
-      "ofac": false,
-      "coinJoinBarrier": false,
-      "coinJoinBarrierCount": 0
-    }
+  "customEntities": [
+    {"entityName": "My Service", "category": "service", "address": "bc1q...", "txid": "abc...", "direction": "backward", "hops": 0}
+  ],
+  "addressLabels": [
+    {"address": "bc1q...", "label": "flagged address", "hops": 2, "direction": "forward"}
+  ],
+  "transactionLabels": [
+    {"txid": "abc...", "label": "ref:ORD-456", "hops": 0}
   ]
 }
 ```
 
-**Notes:**
-- `chainAnalysis` is `null` when `chainDepth` is 0
-- `entities` is empty `[]` when no chain trace is performed
-- Custom labels (origin: "custom") appear in `entities` but do NOT affect `score` or `findings`
-- Built-in entity findings appear in both `chainAnalysis.findings` (with score impact) and `entities` (with relatedness data)
+`customEntities`, `addressLabels`, and `transactionLabels` are populated from your entity store by checking all addresses and txids across all chain hops. They do not affect the privacy score.
 
-**Errors:**
-
-| Status | Condition |
-|--------|-----------|
-| 400 | Missing txid, invalid format, invalid network |
-| 404 | Transaction not found |
-| 502 | Upstream mempool API failure |
+**Errors:** 400 (bad input), 404 (tx not found), 502 (mempool API failure)
 
 ---
 
 ### POST /api/v1/chain-trace
 
-Multi-hop transaction graph analysis with entity detection. Dedicated endpoint for chain tracing without running all 27 heuristics.
+Multi-hop graph analysis without running all 27 heuristics.
 
 **Request:**
 ```json
 {
-  "txid": "0b6461de422c46a221db99608fcbe0326e4f2325ebf2a47c9faf660ed61ee6a4",
+  "txid": "64-char hex",
   "depth": 6,
   "direction": "both",
   "minSats": 1000
 }
 ```
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| txid | string | Yes | - | 64-character hex transaction ID |
-| network | string | No | "mainnet" | "mainnet", "testnet4", or "signet" |
-| depth | number | No | 6 | Hops to trace (0-20) |
-| direction | string | No | "both" | "backward", "forward", or "both" |
-| minSats | number | No | 1000 | Minimum sats to follow |
-| apiUrl | string | No | - | Override mempool API URL |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| txid | string | required | 64-character hex transaction ID |
+| depth | number | 6 | Hops to trace (0-20) |
+| direction | string | both | backward, forward, or both |
+| minSats | number | 1000 | Min sats to follow |
 
-**Response:**
-```json
-{
-  "backward": {
-    "depth": 6,
-    "txsFetched": 47,
-    "aborted": false,
-    "layers": [
-      { "depth": 1, "txCount": 5 },
-      { "depth": 2, "txCount": 18 }
-    ]
-  },
-  "forward": {
-    "depth": 6,
-    "txsFetched": 32,
-    "aborted": false,
-    "layers": [
-      { "depth": 1, "txCount": 5 },
-      { "depth": 2, "txCount": 12 }
-    ]
-  },
-  "findings": [],
-  "entities": []
-}
-```
-
-**Notes:**
-- `backward` or `forward` is `null` when not requested via `direction`
-- Entity proximity and taint analysis run automatically on the traced layers
-
-**Errors:** Same as scan-tx, plus 400 for invalid `direction`.
+**Response:** Same enrichment fields (`customEntities`, `addressLabels`, `transactionLabels`) plus `backward`, `forward`, `findings`.
 
 ---
 
-### POST /api/v1/labels
+### GET /api/v1/health
 
-Add one or more custom labels. Labels associate Bitcoin addresses with entity names and free-form categories.
+Server status. Always public (no auth required).
 
-**Single label:**
 ```json
 {
-  "address": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-  "entityName": "Bull Bitcoin",
-  "category": "internal",
-  "source": "api"
-}
-```
-
-**Batch:**
-```json
-{
-  "labels": [
-    { "address": "bc1q...", "entityName": "Bull Bitcoin", "category": "internal" },
-    { "address": "1A1z...", "entityName": "Flagged Wallet", "category": "scam" }
-  ]
-}
-```
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| address | string | Yes | - | Bitcoin address |
-| entityName | string | Yes | - | Entity or label name |
-| category | string | Yes | - | Free-form category (e.g., "exchange", "scam", "internal", "user") |
-| source | string | No | "api" | Source attribution |
-
-**Response:**
-```json
-{
-  "added": 2
-}
-```
-
-**Notes:**
-- Duplicate addresses are overwritten (upsert via `INSERT OR REPLACE`)
-- Categories are free-form strings - use any value
-- In batch mode, invalid entries (missing required fields) are silently skipped; `added` reflects only valid entries
-
-**Errors:**
-
-| Status | Condition |
-|--------|-----------|
-| 400 | Missing required fields or no valid labels in batch |
-
----
-
-### POST /api/v1/labels/import
-
-Bulk import labels from CSV text.
-
-**Request:** Raw CSV body (Content-Type: text/csv or text/plain)
-
-```
-address,entity_name,category
-bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh,Bull Bitcoin,internal
-1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa,Satoshi,historical
-bc1qflagged123,Suspicious Wallet,flagged
-```
-
-**CSV format:**
-- Header row is auto-detected (if first line contains "address") and skipped
-- 3 columns: `address,entity_name,category`
-- 2 columns: `address,entity_name` (category defaults to "custom")
-- Address must start with `1`, `3`, `bc1`, or `tb1` and be at least 26 characters
-- Empty entity names or categories are rejected
-- Windows line endings (\r\n) are handled
-
-**Response:**
-```json
-{
-  "imported": 3,
-  "errors": 0
+  "status": "ok",
+  "entityFilter": {"status": "ready", "fullLoaded": true},
+  "entityStore": {"entities": 369, "addresses": 3680, "addressLabels": 5, "transactionLabels": 2}
 }
 ```
 
 ---
 
-### GET /api/v1/labels/check/:address
+## Entity Endpoints
 
-Check a single address against all label providers (built-in entities + OFAC + custom labels).
+### POST /api/v1/entities
 
-**Example:** `GET /api/v1/labels/check/bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh`
+Create an entity. At least one address is required.
 
-**Response:**
 ```json
 {
-  "labels": [
-    {
-      "address": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-      "entityName": "Bull Bitcoin",
-      "category": "internal",
-      "source": "api",
-      "origin": "custom",
-      "ofac": false
-    }
-  ]
+  "name": "Entity name",
+  "category": "service",
+  "description": "Optional description",
+  "addresses": ["bc1q...", "1A1z..."]
 }
 ```
 
-**Notes:**
-- Returns labels from ALL providers. An address can have multiple labels (e.g., both built-in entity filter match and custom label)
-- `origin: "builtin"` = from compiled entity data (364+ entities, 31M addresses)
-- `origin: "custom"` = from runtime custom labels (SQLite)
-- Empty `labels: []` when no match found
+**Response (201):**
+```json
+{"id": 1, "name": "Entity name", "category": "service", "addresses": ["bc1q...", "1A1z..."], "addressCount": 2}
+```
+
+**Errors:** 400 (missing fields, no addresses, >10,000 addresses), 409 (name exists)
+
+### GET /api/v1/entities
+
+List all entities. Optional `?category=` filter.
+
+### GET /api/v1/entities/:id
+
+Get entity with address count.
+
+### PUT /api/v1/entities/:id
+
+Update entity. Body: any subset of `{name, category, description}`.
+
+### DELETE /api/v1/entities/:id
+
+Delete entity. Cascades: removes all address mappings.
 
 ---
 
-### POST /api/v1/labels/check
+## Entity Address Endpoints
 
-Batch check multiple addresses.
+### POST /api/v1/entities/:id/addresses
 
-**Request:**
+Add addresses to an entity. Max 10,000 per request.
+
 ```json
-{
-  "addresses": [
-    "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-    "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
-    "bc1qunknown"
-  ]
-}
+{"addresses": ["bc1q...", "1A1z..."]}
 ```
 
-**Response:**
-```json
-{
-  "results": {
-    "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh": [
-      {
-        "address": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-        "entityName": "Bull Bitcoin",
-        "category": "internal",
-        "source": "api",
-        "origin": "custom",
-        "ofac": false
-      }
-    ]
-  }
-}
-```
+An address belongs to one entity. Re-adding to a different entity reassigns it.
 
-**Notes:** Addresses with no matches are omitted from the results object.
+### GET /api/v1/entities/:id/addresses
+
+List all addresses for an entity.
+
+### DELETE /api/v1/entities/:id/addresses/:addr
+
+Remove an address from an entity.
 
 ---
 
-### DELETE /api/v1/labels/:address
+## Address Label Endpoints
 
-Remove a custom label.
+### GET /api/v1/addresses/:addr
 
-**Example:** `DELETE /api/v1/labels/bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh`
+Get address info: entity (if mapped) and label (if set).
 
-**Response:**
 ```json
-{
-  "deleted": true
-}
+{"address": "bc1q...", "entity": {"id": 1, "name": "...", "category": "..."}, "label": "some note"}
 ```
 
-**Notes:** Returns `"deleted": false` if the address had no custom label. Only removes custom labels - built-in entity data cannot be deleted.
+### PUT /api/v1/addresses/:addr/label
+
+Set a freeform label. `{"label": "some note"}`
+
+### DELETE /api/v1/addresses/:addr/label
+
+Remove the label.
 
 ---
 
-### GET /api/v1/labels/stats
+## Transaction Label Endpoints
 
-Custom label store statistics.
+### GET /api/v1/transactions/:txid/label
 
-**Response:**
+Get label. `{"txid": "abc...", "label": "ref:ORD-456"}`
+
+### PUT /api/v1/transactions/:txid/label
+
+Set label. `{"label": "ref:ORD-456"}`
+
+### DELETE /api/v1/transactions/:txid/label
+
+Remove label.
+
+---
+
+## Lookup Endpoints
+
+### POST /api/v1/lookup/addresses
+
+Batch lookup. Addresses with no data are omitted from results.
+
 ```json
-{
-  "count": 1542,
-  "categories": ["exchange", "flagged", "internal", "scam", "user"]
-}
+{"addresses": ["bc1q...", "1A1z..."]}
+```
+
+```json
+{"results": {"bc1q...": {"entity": {"id": 1, "name": "...", "category": "..."}, "label": null}}}
+```
+
+### POST /api/v1/lookup/transactions
+
+Batch lookup transaction labels.
+
+```json
+{"txids": ["abc...", "def..."]}
+```
+
+```json
+{"results": {"abc...": "ref:ORD-456"}}
 ```
 
 ---
 
-## Type Reference
+## Entity Import
 
-### Finding
+`--import-entities` reads entity definitions from `src/data/entities.json` (364 entities) and address mappings from CSV files in `.cache/entity-data/` on startup.
 
-Privacy analysis finding from one of 27 transaction heuristics or 6 chain analysis modules.
-
-```typescript
-{
-  id: string;                   // e.g., "h2-change-detected", "chain-entity-proximity-backward"
-  severity: "critical" | "high" | "medium" | "low" | "good";
-  confidence?: "deterministic" | "high" | "medium" | "low";
-  title: string;
-  description: string;
-  recommendation: string;
-  scoreImpact: number;          // Negative = worse privacy, positive = better
-  params?: {                    // Heuristic-specific data
-    [key: string]: string | number
-  };
-  remediation?: {
-    steps: string[];
-    tools?: { name: string; url: string }[];
-    urgency: "immediate" | "soon" | "when-convenient";
-  };
-}
+For the full 30M address dataset, first download the Maru92 academic dataset:
+```bash
+node scripts/build-entity-filter.mjs --download
+am-i-exposed serve --reimport-entities
 ```
 
-### EntityReport
-
-Entity detected in the transaction's chain trace, enriched with three relatedness dimensions.
-
-```typescript
-{
-  entityName: string;           // "Binance", "Bull Bitcoin", etc.
-  category: string;             // "exchange", "internal", "scam", etc.
-  address: string;              // The matched Bitcoin address
-  txid: string;                 // Transaction where the entity was found
-  direction: "backward" | "forward";
-  origin: "builtin" | "custom"; // Source of the label
-
-  // Dimension 1: Graph topology
-  hops: number;                 // Distance from the analyzed transaction
-
-  // Dimension 2: Value flow (backward direction only)
-  taintFraction: number | null; // 0-1: what fraction of the analyzed tx's
-                                // input value traces through this entity.
-                                // null for forward entities.
-
-  // Dimension 3: Peel chain confidence
-  onPeelChain: boolean;         // Is this entity on the detected change output path?
-  peelChainConfidence: number | null; // Compound Boltzmann probability at this hop.
-                                     // null if not on peel chain.
-
-  // Risk signals
-  ofac: boolean;                // OFAC/sanctions flag
-  coinJoinBarrier: boolean;     // CoinJoin rounds exist between root tx and entity
-  coinJoinBarrierCount: number; // How many CoinJoin rounds
-}
-```
-
-**Relatedness dimensions explained:**
-
-| Dimension | Question | Source | Range |
-|-----------|----------|--------|-------|
-| `hops` | How far away? | Transaction graph traversal | 1-20 |
-| `taintFraction` | How much money? | Proportional value flow (haircut method) | 0.0-1.0 |
-| `peelChainConfidence` | How sure is the link? | Compound Boltzmann probability | 0.0-1.0 |
-
-### Grade Scale
-
-| Grade | Score | Interpretation |
-|-------|-------|----------------|
-| A+ | 90-100 | Excellent privacy practices |
-| B | 75-89 | Good, minor issues |
-| C | 50-74 | Fair, notable concerns |
-| D | 25-49 | Poor, significant exposure |
-| F | 0-24 | Critical privacy failures |
-
-### Transaction Types
-
-| Type | Description |
-|------|-------------|
-| `whirlpool-coinjoin` | Samourai Whirlpool CoinJoin |
-| `wabisabi-coinjoin` | Wasabi WabiSabi CoinJoin |
-| `joinmarket-coinjoin` | JoinMarket CoinJoin |
-| `generic-coinjoin` | Unclassified CoinJoin |
-| `stonewall` | Samourai Stonewall |
-| `tx0-premix` | Whirlpool premix transaction |
-| `bip47-notification` | BIP47 notification transaction |
-| `ricochet` | Samourai Ricochet |
-| `consolidation` | Multi-input, single-output |
-| `exchange-withdrawal` | Exchange batch withdrawal pattern |
-| `batch-payment` | Fan-out payment |
-| `peel-chain` | Sequential single-output spends |
-| `coinbase` | Mining reward |
-| `simple-payment` | Standard payment |
-| `unknown` | Unclassified |
+Import is skipped if entities already exist. Use `--reimport-entities` to force.
 
 ---
 
-## Custom Labels
+## Data Model
 
-Custom labels are **report-only** - they appear in the `entities` array of scan and chain-trace responses but do **not** affect the privacy `score` or generate `findings`. This design ensures:
+```
+Entity (name, category, description)
+  |-- Addresses (one entity per address)
 
-1. The privacy score remains objective (driven by built-in entity data and heuristic analysis)
-2. Custom labels provide visibility for your own business logic
-3. Your backend can apply its own rules based on the `entities` array
+Address Label (freeform text, independent of entity)
+Transaction Label (freeform text)
+```
 
-**Categories** are free-form strings. Use whatever makes sense for your use case:
-- `"exchange"` - known exchange addresses
-- `"internal"` - your own wallet addresses
-- `"scam"` - flagged/suspicious addresses
-- `"user"` - customer addresses
-- `"flagged"` - addresses under investigation
-
-**Provider precedence:** When an address matches both a built-in entity and a custom label, both labels are returned. The `origin` field distinguishes them. In the `entities` array (which deduplicates by address), built-in labels take precedence (registered first).
-
-**Persistence:** Custom labels are stored in `~/.am-i-exposed/labels.sqlite` and persist across server restarts.
+- Entities connect to transactions indirectly through addresses
+- Input addresses = sender side, output addresses = recipient side
+- Labels are freeform annotations, no structure enforced
+- Custom entities and labels do not affect privacy scores
+- Data stored in `~/.am-i-exposed/entities.sqlite`, separate from the API response cache
