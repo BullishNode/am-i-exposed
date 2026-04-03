@@ -1,5 +1,6 @@
 export { matchEntitySync, detectEntityBehavior } from "./entity-match";
 export {
+  configureDataLoader,
   loadEntityFilter,
   loadFullEntityFilter,
   getFilter,

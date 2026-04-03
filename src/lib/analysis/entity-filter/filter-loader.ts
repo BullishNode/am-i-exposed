@@ -133,6 +133,29 @@ function parseBloomFilter(
   };
 }
 
+// ───────────────── Data loader configuration ─────────────────
+
+/**
+ * Optional override for the fetch mechanism.
+ * Set by CLI/Node.js environments that need filesystem-based loading
+ * instead of browser fetch().
+ */
+let fetchOverride: ((path: string) => Promise<ArrayBuffer | null>) | null =
+  null;
+
+/**
+ * Configure the data loader for non-browser environments (CLI, Node.js).
+ * Call once at startup before loading any entity data.
+ *
+ * @param opts.fetchFn - Custom fetch function that resolves internal paths
+ *   like "/data/entity-index.bin" to the appropriate data source.
+ */
+export function configureDataLoader(opts: {
+  fetchFn?: (path: string) => Promise<ArrayBuffer | null>;
+}): void {
+  fetchOverride = opts.fetchFn ?? null;
+}
+
 // ───────────────── Streaming fetch helper ─────────────────
 
 /** Progress callback: received bytes and total bytes (0 if unknown). */
@@ -146,6 +169,9 @@ async function fetchArrayBuffer(
   path: string,
   onProgress?: ProgressCallback,
 ): Promise<ArrayBuffer | null> {
+  // Allow CLI / Node.js to override the fetch mechanism
+  if (fetchOverride) return fetchOverride(path);
+
   const res = await fetch(path);
   if (!res.ok) return null;
 
