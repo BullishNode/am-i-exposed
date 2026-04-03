@@ -12,15 +12,20 @@ import {
 
 /** POST /api/v1/entities */
 export async function handleCreateEntity(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const body = (await parseJsonBody(req)) as { name?: string; category?: string; description?: string } | null;
+  const body = (await parseJsonBody(req)) as { name?: string; category?: string; description?: string; addresses?: string[] } | null;
   if (!body?.name || !body?.category) {
-    sendError(res, 400, "Required fields: name, category");
+    sendError(res, 400, "Required fields: name, category, addresses");
+    return;
+  }
+  if (!body.addresses || !Array.isArray(body.addresses) || body.addresses.length === 0) {
+    sendError(res, 400, "At least one address is required");
     return;
   }
   try {
     const entity = createEntity(body.name, body.category, body.description);
     if (!entity) { sendError(res, 500, "Failed to create entity"); return; }
-    sendJson(res, 201, entity);
+    const added = addAddressesToEntity(entity.id, body.addresses);
+    sendJson(res, 201, { ...entity, addresses: body.addresses, addressCount: added });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("UNIQUE")) {
