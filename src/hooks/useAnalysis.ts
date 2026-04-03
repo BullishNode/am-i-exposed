@@ -18,6 +18,7 @@ import { parsePSBT } from "@/lib/bitcoin/psbt";
 import { getAnalysisSettings } from "@/hooks/useAnalysisSettings";
 import { getCachedResult, putCachedResult } from "@/lib/api/analysis-cache";
 import { loadEntityFilter } from "@/lib/analysis/entity-filter";
+import { useCustomEntities } from "@/hooks/useCustomEntities";
 import { runTxidAnalysis } from "@/lib/analysis/run-txid-analysis";
 import { runAddressAnalysis } from "@/lib/analysis/run-address-analysis";
 import type { HeuristicTranslator } from "@/lib/analysis/heuristics/types";
@@ -41,6 +42,9 @@ export function useAnalysis() {
 
   // Auto-load core entity filter on mount
   useEffect(() => { loadEntityFilter(); }, []);
+
+  // Load custom entities from API server (if running in server mode)
+  useCustomEntities();
 
   // Wrap t as HeuristicTranslator for passing into analysis layer
   const ht: HeuristicTranslator = useCallback(

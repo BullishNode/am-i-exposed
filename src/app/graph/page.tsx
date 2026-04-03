@@ -12,6 +12,7 @@ import { loadSavedGraph } from "@/lib/graph/graph-loader";
 import { savedGraphStore } from "@/hooks/useSavedGraphs";
 import type { MempoolTransaction } from "@/lib/api/types";
 import type { SavedGraph } from "@/lib/graph/saved-graph-types";
+import { useCustomEntities } from "@/hooks/useCustomEntities";
 
 const GraphExplorer = lazy(() =>
   import("@/components/viz/GraphExplorer").then((m) => ({ default: m.GraphExplorer })),
@@ -24,6 +25,9 @@ export default function GraphPage() {
   const { t } = useTranslation();
   const { network, config, setNetwork } = useNetwork();
   const api = useMemo(() => createApiClient(config), [config]);
+
+  // Load custom entities from API server (if running in server mode)
+  useCustomEntities();
 
   const {
     nodes,
