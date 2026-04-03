@@ -1,8 +1,6 @@
 /**
  * Transaction scan endpoint.
  * POST /api/v1/scan/tx
- *
- * Reuses the core logic from cli/src/commands/scan-tx.ts.
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
@@ -17,9 +15,19 @@ import type { MempoolTransaction } from "@/lib/api/types";
 import { traceBackward, traceForward } from "@/lib/analysis/chain/recursive-trace";
 import { analyzeEntityProximity } from "@/lib/analysis/chain/entity-proximity";
 import { analyzeBackwardTaint } from "@/lib/analysis/chain/taint";
+import { analyzeBackward } from "@/lib/analysis/chain/backward";
+import { analyzeForward } from "@/lib/analysis/chain/forward";
+import { buildCluster } from "@/lib/analysis/chain/clustering";
+import { analyzeSpendingPatterns } from "@/lib/analysis/chain/spending-patterns";
+import { buildLinkabilityMatrix } from "@/lib/analysis/chain/linkability";
+import { buildParentTxsByIdx, buildChildTxsByIdx, buildTxsByAddress } from "@/lib/analysis/chain/trace-maps";
+import { enrichFindingsWithMetadata } from "@/lib/analysis/finding-metadata";
+import { TX_BASE_SCORE } from "@/lib/scoring/score";
 import { matchEntitySync } from "@/lib/analysis/entity-filter/entity-match";
 import { enrichFromStore } from "../enrich";
+import { discoverClusterEntities } from "../cluster-discovery";
 import { createClient } from "../../util/api";
+import type { Finding } from "@/lib/types";
 
 interface ScanTxBody {
   txid: string;
@@ -62,7 +70,7 @@ export async function handleScanTx(
   });
 
   // Fetch transaction
-  let tx;
+  let tx: MempoolTransaction;
   try {
     tx = await client.getTransaction(txid);
   } catch (err) {
@@ -87,29 +95,94 @@ export async function handleScanTx(
     ctx = await buildTxContext(tx, client);
   }
 
-  // Run heuristic analysis
+  // Run heuristic analysis (27 tx heuristics)
   const result = await analyzeTransaction(tx, rawHex, undefined, ctx);
 
   // Chain analysis
   let chainAnalysis: unknown = null;
   let enrichment = { customEntities: [] as unknown[], addressLabels: [] as unknown[], transactionLabels: [] as unknown[] };
+  let clusterDiscoveries: unknown[] = [];
 
   if (chainDepth > 0) {
     const backwardResult = await traceBackward(tx, chainDepth, minSats, client);
     const forwardResult = await traceForward(tx, chainDepth, minSats, client);
 
-    // Entity proximity findings (for score impact - uses built-in entity filter)
-    const proximityResult = analyzeEntityProximity(tx, backwardResult.layers, forwardResult.layers);
+    // Fetch outspends (needed for forward analysis + spending patterns)
+    let outspends: import("@/lib/api/types").MempoolOutspend[] | null = null;
+    try {
+      outspends = await client.getTxOutspends(txid);
+    } catch {
+      // Non-critical — forward analysis will be limited
+    }
 
-    // Taint analysis (uses built-in entity filter)
+    // Build helper maps
+    const parentTxsByIdx = buildParentTxsByIdx(tx, backwardResult.layers, null);
+    const childTxsByIdx = buildChildTxsByIdx(outspends, forwardResult.layers, null);
+
+    const chainFindings: Finding[] = [];
+    let coinJoinInputIndices: number[] = [];
+
+    // 1. Backward analysis (input provenance)
+    if (parentTxsByIdx.size > 0) {
+      const backwardAnalysis = analyzeBackward(tx, parentTxsByIdx);
+      chainFindings.push(...backwardAnalysis.findings);
+      coinJoinInputIndices = backwardAnalysis.coinJoinInputs;
+    }
+
+    // 2. Forward analysis (output destinations)
+    if (childTxsByIdx.size > 0 && outspends) {
+      const forwardAnalysis = analyzeForward(tx, outspends, childTxsByIdx);
+      chainFindings.push(...forwardAnalysis.findings);
+    }
+
+    // 3. Address clustering (CIOH)
+    let clusterAddresses: Set<string> | null = null;
+    const hasTraceLayers = backwardResult.layers.length > 0 || forwardResult.layers.length > 0;
+    if (hasTraceLayers) {
+      const txsByAddress = buildTxsByAddress(tx, backwardResult.layers, forwardResult.layers);
+      const seedAddr = tx.vin[0]?.prevout?.scriptpubkey_address;
+      if (seedAddr) {
+        const clusterResult = buildCluster(seedAddr, txsByAddress);
+        chainFindings.push(...clusterResult.findings);
+        clusterAddresses = clusterResult.clusterAddresses;
+      }
+    }
+
+    // 4. Spending patterns
+    const allBackwardTxs = new Map<string, MempoolTransaction>();
+    for (const layer of backwardResult.layers) {
+      for (const [tid, btx] of layer.txs) allBackwardTxs.set(tid, btx);
+    }
+    const spendingResult = analyzeSpendingPatterns(
+      tx, parentTxsByIdx, coinJoinInputIndices,
+      outspends, childTxsByIdx, allBackwardTxs,
+    );
+    chainFindings.push(...spendingResult.findings);
+
+    // 5. Entity proximity (already existed)
+    const proximityResult = analyzeEntityProximity(tx, backwardResult.layers, forwardResult.layers);
+    chainFindings.push(...proximityResult.findings);
+
+    // 6. Taint flow (already existed)
     const entityChecker = (addr: string) => {
       const match = matchEntitySync(addr);
       return match ? { category: match.category, entityName: match.entityName } : null;
     };
     const taintResult = analyzeBackwardTaint(tx, backwardResult.layers, entityChecker);
+    chainFindings.push(...taintResult.findings);
 
-    const chainFindings = [...proximityResult.findings, ...taintResult.findings];
+    // 7. Linkability matrix
+    const linkResult = buildLinkabilityMatrix(tx);
+    if (linkResult) chainFindings.push(...linkResult.findings);
+
+    // Enrich all findings with metadata (adversary tiers, temporality)
     result.findings.push(...chainFindings);
+    enrichFindingsWithMetadata(result.findings);
+
+    // Cluster-entity cross-reference + auto-discovery
+    if (clusterAddresses && clusterAddresses.size > 1) {
+      clusterDiscoveries = discoverClusterEntities(clusterAddresses);
+    }
 
     chainAnalysis = {
       backward: {
@@ -127,7 +200,7 @@ export async function handleScanTx(
       findings: chainFindings,
     };
 
-    // Enrich with custom entities, address labels, and transaction labels from store
+    // Enrich with custom entities, address labels, transaction labels from store
     enrichment = enrichFromStore(tx, backwardResult.layers, forwardResult.layers);
   }
 
@@ -144,6 +217,10 @@ export async function handleScanTx(
     score: result.score,
     grade: result.grade,
     txType: result.txType ?? null,
+    scoreBreakdown: {
+      baseScore: TX_BASE_SCORE,
+      totalImpact: result.findings.reduce((s, f) => s + f.scoreImpact, 0),
+    },
     txInfo: {
       inputs: tx.vin.length,
       outputs: tx.vout.length,
@@ -161,6 +238,7 @@ export async function handleScanTx(
     customEntities: enrichment.customEntities,
     addressLabels: enrichment.addressLabels,
     transactionLabels: enrichment.transactionLabels,
+    clusterDiscoveries,
   });
 }
 

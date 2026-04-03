@@ -1,8 +1,6 @@
 /**
  * Chain trace endpoint.
  * POST /api/v1/chain-trace
- *
- * Multi-hop transaction graph analysis with entity detection.
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
@@ -11,9 +9,18 @@ import type { MempoolTransaction } from "@/lib/api/types";
 import { traceBackward, traceForward } from "@/lib/analysis/chain/recursive-trace";
 import { analyzeEntityProximity } from "@/lib/analysis/chain/entity-proximity";
 import { analyzeBackwardTaint } from "@/lib/analysis/chain/taint";
+import { analyzeBackward } from "@/lib/analysis/chain/backward";
+import { analyzeForward } from "@/lib/analysis/chain/forward";
+import { buildCluster } from "@/lib/analysis/chain/clustering";
+import { analyzeSpendingPatterns } from "@/lib/analysis/chain/spending-patterns";
+import { buildLinkabilityMatrix } from "@/lib/analysis/chain/linkability";
+import { buildParentTxsByIdx, buildChildTxsByIdx, buildTxsByAddress } from "@/lib/analysis/chain/trace-maps";
+import { enrichFindingsWithMetadata } from "@/lib/analysis/finding-metadata";
 import { matchEntitySync } from "@/lib/analysis/entity-filter/entity-match";
 import { enrichFromStore } from "../enrich";
+import { discoverClusterEntities } from "../cluster-discovery";
 import { createClient } from "../../util/api";
+import type { Finding } from "@/lib/types";
 
 interface ChainTraceBody {
   txid: string;
@@ -62,7 +69,7 @@ export async function handleChainTrace(
     cache: true,
   });
 
-  let tx;
+  let tx: MempoolTransaction;
   try {
     tx = await client.getTransaction(txid);
   } catch (err) {
@@ -75,7 +82,6 @@ export async function handleChainTrace(
     return;
   }
 
-  // Trace
   const doBackward = direction === "backward" || direction === "both";
   const doForward = direction === "forward" || direction === "both";
 
@@ -86,10 +92,62 @@ export async function handleChainTrace(
     ? await traceForward(tx, depth, minSats, client)
     : { layers: [], allTxs: new Map<string, MempoolTransaction>(), fetchCount: 0, aborted: false };
 
-  // Entity proximity findings (uses built-in entity filter)
-  const proximityResult = analyzeEntityProximity(tx, backwardResult.layers, forwardResult.layers);
+  // Fetch outspends
+  let outspends: import("@/lib/api/types").MempoolOutspend[] | null = null;
+  try {
+    outspends = await client.getTxOutspends(txid);
+  } catch { /* non-critical */ }
 
-  // Taint analysis (uses built-in entity filter)
+  // Build helper maps
+  const parentTxsByIdx = buildParentTxsByIdx(tx, backwardResult.layers, null);
+  const childTxsByIdx = buildChildTxsByIdx(outspends, forwardResult.layers, null);
+
+  const findings: Finding[] = [];
+  let coinJoinInputIndices: number[] = [];
+  let clusterDiscoveries: unknown[] = [];
+
+  // 1. Backward analysis
+  if (doBackward && parentTxsByIdx.size > 0) {
+    const backwardAnalysis = analyzeBackward(tx, parentTxsByIdx);
+    findings.push(...backwardAnalysis.findings);
+    coinJoinInputIndices = backwardAnalysis.coinJoinInputs;
+  }
+
+  // 2. Forward analysis
+  if (doForward && childTxsByIdx.size > 0 && outspends) {
+    const forwardAnalysis = analyzeForward(tx, outspends, childTxsByIdx);
+    findings.push(...forwardAnalysis.findings);
+  }
+
+  // 3. Address clustering
+  let clusterAddresses: Set<string> | null = null;
+  const hasTraceLayers = backwardResult.layers.length > 0 || forwardResult.layers.length > 0;
+  if (hasTraceLayers) {
+    const txsByAddress = buildTxsByAddress(tx, backwardResult.layers, forwardResult.layers);
+    const seedAddr = tx.vin[0]?.prevout?.scriptpubkey_address;
+    if (seedAddr) {
+      const clusterResult = buildCluster(seedAddr, txsByAddress);
+      findings.push(...clusterResult.findings);
+      clusterAddresses = clusterResult.clusterAddresses;
+    }
+  }
+
+  // 4. Spending patterns
+  const allBackwardTxs = new Map<string, MempoolTransaction>();
+  for (const layer of backwardResult.layers) {
+    for (const [tid, btx] of layer.txs) allBackwardTxs.set(tid, btx);
+  }
+  const spendingResult = analyzeSpendingPatterns(
+    tx, parentTxsByIdx, coinJoinInputIndices,
+    outspends, childTxsByIdx, allBackwardTxs,
+  );
+  findings.push(...spendingResult.findings);
+
+  // 5. Entity proximity
+  const proximityResult = analyzeEntityProximity(tx, backwardResult.layers, forwardResult.layers);
+  findings.push(...proximityResult.findings);
+
+  // 6. Taint flow
   const entityChecker = (addr: string) => {
     const match = matchEntitySync(addr);
     return match ? { category: match.category, entityName: match.entityName } : null;
@@ -97,10 +155,21 @@ export async function handleChainTrace(
   const taintResult = doBackward
     ? analyzeBackwardTaint(tx, backwardResult.layers, entityChecker)
     : { findings: [], outputTaint: new Map(), inputSources: new Map() };
+  findings.push(...taintResult.findings);
 
-  const findings = [...proximityResult.findings, ...taintResult.findings];
+  // 7. Linkability matrix
+  const linkResult = buildLinkabilityMatrix(tx);
+  if (linkResult) findings.push(...linkResult.findings);
 
-  // Enrich with custom entities, address labels, and transaction labels from store
+  // Enrich findings with metadata
+  enrichFindingsWithMetadata(findings);
+
+  // Cluster-entity cross-reference
+  if (clusterAddresses && clusterAddresses.size > 1) {
+    clusterDiscoveries = discoverClusterEntities(clusterAddresses);
+  }
+
+  // Custom entities, address labels, transaction labels
   const enrichment = enrichFromStore(tx, backwardResult.layers, forwardResult.layers);
 
   sendJson(res, 200, {
@@ -124,5 +193,6 @@ export async function handleChainTrace(
     customEntities: enrichment.customEntities,
     addressLabels: enrichment.addressLabels,
     transactionLabels: enrichment.transactionLabels,
+    clusterDiscoveries,
   });
 }
