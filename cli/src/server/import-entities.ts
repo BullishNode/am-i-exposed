@@ -3,28 +3,29 @@
  *
  * Reads:
  *   1. src/data/entities.json → entity definitions
- *   2. .cache/entity-data/curated/*.csv → curated address mappings (~195K)
+ *   2. .cache/entity-data/curated/*.csv → curated address mappings
  *   3. .cache/entity-data/custom/*.csv → custom address mappings
- *   4. .cache/entity-data/maru92/*.csv → Maru92 academic dataset (~30M, optional)
- *   5. .cache/entity-data/temporal/*.csv → BitcoinTemporalGraph (~100K, optional)
+ *   4. .cache/entity-data/maru92/*.csv → Maru92 academic dataset (~30M)
+ *   5. .cache/entity-data/temporal/*.csv → BitcoinTemporalGraph
+ *   6. src/data/ofac-addresses.json → OFAC sanctioned addresses
  *
- * Run with: am-i-exposed serve --import-entities
+ * ALL addresses go into known_addresses. Matched entities get entity_id.
+ * Unmatched addresses get category from filename or raw entity name.
  */
 
 import { readFileSync, existsSync, readdirSync } from "fs";
-import { join } from "path";
+import { join, basename } from "path";
 import { createReadStream } from "fs";
 import { createInterface } from "readline";
 import {
   createEntity as storeCreateEntity,
   getEntityByName,
   addAddressesToEntity,
+  bulkAddKnownAddresses,
   entityStoreStats,
 } from "../adapters/entity-store";
 
-/** Resolve the am-i-exposed project root (where src/data/entities.json lives). */
 function projectRoot(): string {
-  // Try common locations: CWD, parent of CWD (if running from cli/), __dirname
   const candidates = [
     process.cwd(),
     join(process.cwd(), ".."),
@@ -36,7 +37,6 @@ function projectRoot(): string {
   for (const dir of candidates) {
     if (existsSync(join(dir, "src", "data", "entities.json"))) return dir;
   }
-  // Fallback: walk up from CWD
   let dir = process.cwd();
   for (let i = 0; i < 6; i++) {
     if (existsSync(join(dir, "src", "data", "entities.json"))) return dir;
@@ -64,10 +64,35 @@ function isValidAddress(addr: string): boolean {
   return /^(1|3|bc1|tb1)/.test(addr);
 }
 
-/**
- * Import all entity data into SQLite.
- * Skips if data has already been imported (checks entity count).
- */
+/** Guess category from CSV filename. */
+function categoryFromFilename(filename: string): string {
+  const lower = filename.toLowerCase();
+  if (lower.includes("exchange")) return "exchange";
+  if (lower.includes("darknet")) return "darknet";
+  if (lower.includes("ransomware") || lower.includes("ransomwhere")) return "ransomware";
+  if (lower.includes("mixer")) return "mixer";
+  if (lower.includes("mining")) return "mining";
+  if (lower.includes("gambling") || lower.includes("satoshidice")) return "gambling";
+  if (lower.includes("scam") || lower.includes("ponzi")) return "scam";
+  if (lower.includes("p2p")) return "p2p";
+  if (lower.includes("ofac") || lower.includes("doj") || lower.includes("seizure")) return "sanctions";
+  if (lower.includes("collectible")) return "collectibles";
+  if (lower.includes("bitcointalk") || lower.includes("reddit")) return "forum";
+  if (lower.includes("payment") || lower.includes("service")) return "payment";
+  return "unknown";
+}
+
+/** Guess category from Maru92 raw entity name. */
+function categoryFromEntityName(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.includes("exchange") || lower.includes("trade") || lower.includes("swap")) return "exchange";
+  if (lower.includes("casino") || lower.includes("gambl") || lower.includes("dice") || lower.includes("bet")) return "gambling";
+  if (lower.includes("pool") || lower.includes("mining")) return "mining";
+  if (lower.includes("mix") || lower.includes("tumbl") || lower.includes("fog")) return "mixer";
+  if (lower.includes("market") || lower.includes("silk") || lower.includes("hydra")) return "darknet";
+  return "exchange"; // Maru92 is mostly exchanges
+}
+
 export async function importEntities(opts?: { force?: boolean }): Promise<void> {
   const root = projectRoot();
   const entitiesPath = join(root, "src", "data", "entities.json");
@@ -82,16 +107,14 @@ export async function importEntities(opts?: { force?: boolean }): Promise<void> 
   const entityDefs: EntityDef[] = entitiesJson.entities;
   console.log(`  Found ${entityDefs.length} entity definitions.`);
 
-  // Skip if built-in entities already imported (custom entities via API don't block this)
   const stats = entityStoreStats();
   if (stats.entities >= entityDefs.length && !opts?.force) {
     console.log(`  Already imported (${stats.entities} entities, ${stats.knownAddresses} known addresses). Use --reimport-entities to force.`);
     return;
   }
 
-  // Build lookup: lowercase name → entity id
+  // Create entity definitions
   const entityIdMap = new Map<string, number>();
-
   for (const def of entityDefs) {
     const existing = getEntityByName(def.name);
     if (existing) {
@@ -99,94 +122,120 @@ export async function importEntities(opts?: { force?: boolean }): Promise<void> 
       continue;
     }
     const created = storeCreateEntity(
-      def.name,
-      def.category,
+      def.name, def.category,
       [def.country, def.status, def.ofac ? "OFAC" : null].filter(Boolean).join(", ") || undefined,
     );
-    if (created) {
-      entityIdMap.set(def.name.toLowerCase(), created.id);
-    }
+    if (created) entityIdMap.set(def.name.toLowerCase(), created.id);
   }
-  console.log(`  Imported ${entityIdMap.size} entities.`);
+  console.log(`  ${entityIdMap.size} entities ready.`);
 
-  // Build name resolution map (same logic as build-entity-filter.mjs)
+  // Name resolution map
   const nameLookup = new Map<string, string>();
   for (const def of entityDefs) {
     nameLookup.set(def.name.toLowerCase(), def.name);
-    // Strip common TLDs for fuzzy matching
-    const stripped = def.name
-      .toLowerCase()
+    const stripped = def.name.toLowerCase()
       .replace(/\.(com|net|org|io|eu|ag|me|info|st|co\.in|com\.br|com\.au|in\.th)$/i, "")
       .replace(/\s*(marketplace|market)$/i, "")
       .trim();
-    if (stripped !== def.name.toLowerCase()) {
-      nameLookup.set(stripped, def.name);
-    }
+    if (stripped !== def.name.toLowerCase()) nameLookup.set(stripped, def.name);
   }
 
-  // Collect CSV directories
+  // Process all CSV directories
   const cacheDir = join(root, ".cache", "entity-data");
   const csvDirs = ["curated", "custom", "maru92", "temporal"]
     .map((d) => join(cacheDir, d))
     .filter((d) => existsSync(d));
 
-  let totalAddresses = 0;
-  let totalSkipped = 0;
+  let totalMatched = 0;
+  let totalUnmatched = 0;
+  let totalAutoCreated = 0;
   let totalInvalid = 0;
   let totalFiles = 0;
 
   for (const dir of csvDirs) {
+    const dirName = basename(dir);
     const files = readdirSync(dir).filter((f) => f.endsWith(".csv")).sort();
     if (files.length === 0) continue;
-    console.log(`  Processing ${files.length} CSV files from ${dir.split("/").pop()}/...`);
+    console.log(`  Processing ${files.length} CSV files from ${dirName}/...`);
 
     for (const file of files) {
       const filePath = join(dir, file);
-      const result = await importCsvFile(filePath, entityIdMap, nameLookup);
-      totalAddresses += result.imported;
-      totalSkipped += result.skipped;
+      const isMaru92 = dirName === "maru92";
+      const result = await importCsvFile(filePath, entityIdMap, nameLookup, isMaru92);
+      totalMatched += result.matched;
+      totalUnmatched += result.unmatched;
+      totalAutoCreated += result.autoCreated;
       totalInvalid += result.invalid;
       totalFiles++;
-      if (result.imported > 0) {
-        process.stdout.write(`    ${file}: ${result.imported} addresses\n`);
+      const total = result.matched + result.unmatched + result.autoCreated;
+      if (total > 0) {
+        process.stdout.write(`    ${file}: ${total} addresses`);
+        if (result.autoCreated > 0) process.stdout.write(` (${result.autoCreated} new entities)`);
+        process.stdout.write("\n");
       }
     }
   }
 
+  // Import OFAC addresses
+  const ofacPath = join(root, "src", "data", "ofac-addresses.json");
+  if (existsSync(ofacPath)) {
+    const ofacData = JSON.parse(readFileSync(ofacPath, "utf-8"));
+    const ofacAddrs: string[] = ofacData.addresses ?? [];
+    let ofacImported = 0;
+    // Match each OFAC address to its entity
+    const rows = ofacAddrs.map((addr) => {
+      const normalized = normalizeAddress(addr);
+      // Try to find entity for this address via the entity filter's name lookup
+      // OFAC addresses may not have entity matches in our CSV data, so import as category "sanctions"
+      return { address: normalized, category: "sanctions", source: "ofac", confidence: 100 };
+    }).filter((r) => isValidAddress(r.address));
+    ofacImported = bulkAddKnownAddresses(rows);
+    console.log(`  OFAC: ${ofacImported} addresses imported.`);
+  }
+
   const finalStats = entityStoreStats();
-  console.log(`  Import complete: ${totalFiles} files, ${totalAddresses} addresses imported.`);
-  if (totalSkipped > 0) console.log(`  Skipped ${totalSkipped} addresses (entity not in entities.json).`);
-  if (totalInvalid > 0) console.log(`  Invalid ${totalInvalid} lines (bad format or address).`);
-  console.log(`  Entity store: ${finalStats.entities} entities, ${finalStats.knownAddresses} known addresses.`);
+  console.log(`  Import complete: ${totalFiles} files.`);
+  console.log(`    Matched to entities: ${totalMatched}`);
+  console.log(`    Auto-created entities: ${totalAutoCreated}`);
+  console.log(`    Category-only (no entity): ${totalUnmatched}`);
+  console.log(`    Invalid/skipped: ${totalInvalid}`);
+  console.log(`  Store: ${finalStats.entities} entities, ${finalStats.knownAddresses} known addresses.`);
 }
 
-/**
- * Import a single CSV file into the entity store.
- * Auto-detects headers and column positions (same logic as build-entity-filter.mjs).
- */
 async function importCsvFile(
   filePath: string,
   entityIdMap: Map<string, number>,
   nameLookup: Map<string, string>,
-): Promise<{ imported: number; skipped: number; invalid: number }> {
+  autoCreateEntities: boolean,
+): Promise<{ matched: number; unmatched: number; autoCreated: number; invalid: number }> {
   let addrIdx = 0;
   let entityIdx = 1;
   let headerDetected = false;
-  let imported = 0;
-  let skipped = 0;  // entity not in entities.json
-  let invalid = 0;  // bad format or missing fields
+  let matched = 0;
+  let unmatched = 0;
+  let autoCreated = 0;
+  let invalid = 0;
 
-  // Batch for performance — track total incrementally
-  const BATCH_SIZE = 5000;
-  const batch = new Map<number, string[]>();
+  const filename = basename(filePath);
+  const fileCategory = categoryFromFilename(filename);
+  const fileSource = basename(filePath, ".csv");
+
+  // Batches: entity-linked addresses and category-only addresses
+  const BATCH_SIZE = 10000;
+  const entityBatch = new Map<number, string[]>();
+  const categoryBatch: Array<{ address: string; category: string; source: string; confidence: number }> = [];
   let batchTotal = 0;
 
   function flushBatch(): void {
-    for (const [eid, addrs] of batch) {
-      addAddressesToEntity(eid, addrs);
-      imported += addrs.length;
+    for (const [eid, addrs] of entityBatch) {
+      addAddressesToEntity(eid, addrs, fileSource);
+      matched += addrs.length;
     }
-    batch.clear();
+    entityBatch.clear();
+    if (categoryBatch.length > 0) {
+      unmatched += bulkAddKnownAddresses(categoryBatch);
+      categoryBatch.length = 0;
+    }
     batchTotal = 0;
   }
 
@@ -201,7 +250,6 @@ async function importCsvFile(
 
     const parts = line.split(",").map((s) => s.replace(/^"|"$/g, "").trim());
 
-    // Header detection on first non-empty line
     if (!headerDetected) {
       headerDetected = true;
       const lower = parts.map((c) => c.toLowerCase());
@@ -223,53 +271,58 @@ async function importCsvFile(
       }
     }
 
-    // Extract and validate address
     const rawAddr = parts[addrIdx];
     if (!rawAddr) { invalid++; continue; }
     const addr = normalizeAddress(rawAddr);
     if (!isValidAddress(addr)) { invalid++; continue; }
 
-    // Extract and resolve entity name
     const rawEntity = parts[entityIdx];
     if (!rawEntity) { invalid++; continue; }
 
+    // Try to resolve to a known entity
     const canonicalName = resolveEntityName(rawEntity, nameLookup);
-    const entityId = canonicalName ? entityIdMap.get(canonicalName.toLowerCase()) : undefined;
-    if (!entityId) {
-      skipped++;
-      continue;
+    let entityId = canonicalName ? entityIdMap.get(canonicalName.toLowerCase()) : undefined;
+
+    // Auto-create entity for Maru92 unknowns
+    if (!entityId && autoCreateEntities && rawEntity.length > 1) {
+      const category = categoryFromEntityName(rawEntity);
+      const created = storeCreateEntity(rawEntity, category);
+      if (created) {
+        entityId = created.id;
+        entityIdMap.set(rawEntity.toLowerCase(), created.id);
+        nameLookup.set(rawEntity.toLowerCase(), rawEntity);
+        autoCreated++;
+      }
     }
 
-    // Add to batch
-    const existing = batch.get(entityId);
-    if (existing) {
-      existing.push(addr);
+    if (entityId) {
+      const existing = entityBatch.get(entityId);
+      if (existing) existing.push(addr);
+      else entityBatch.set(entityId, [addr]);
     } else {
-      batch.set(entityId, [addr]);
+      // No entity match — store as category-only known address
+      categoryBatch.push({
+        address: addr,
+        category: fileCategory,
+        source: fileSource,
+        confidence: fileCategory === "ransomware" ? 60 : 20,
+      });
     }
     batchTotal++;
-
     if (batchTotal >= BATCH_SIZE) flushBatch();
   }
 
   flushBatch();
-  return { imported, skipped, invalid };
+  return { matched, unmatched, autoCreated, invalid };
 }
 
-/** Resolve a raw CSV entity name to the canonical name from entities.json. */
-function resolveEntityName(
-  rawName: string,
-  nameLookup: Map<string, string>,
-): string | null {
+function resolveEntityName(rawName: string, nameLookup: Map<string, string>): string | null {
   const lower = rawName.toLowerCase().trim();
   if (nameLookup.has(lower)) return nameLookup.get(lower)!;
-
-  // Strip TLDs
   const stripped = lower
     .replace(/\.(com|net|org|io|eu|ag|me|info|st|co\.in|com\.br|com\.au|in\.th)$/i, "")
     .replace(/\s*(marketplace|market)$/i, "")
     .trim();
   if (nameLookup.has(stripped)) return nameLookup.get(stripped)!;
-
   return null;
 }
