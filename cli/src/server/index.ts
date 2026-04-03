@@ -6,7 +6,7 @@
  */
 
 import { createServer } from "http";
-import { addRoute, clearRoutes, handleRequest } from "./router";
+import { addRoute, clearRoutes, handleRequest, setAuthToken } from "./router";
 import { handleHealth } from "./handlers/health";
 import { handleScanTx } from "./handlers/scan-tx";
 import { handleChainTrace } from "./handlers/chain-trace";
@@ -30,13 +30,25 @@ export async function startApiServer(opts: GlobalOpts): Promise<void> {
   const port = Number(opts.port ?? 3001);
   const host = (opts.host as string) ?? "127.0.0.1";
 
-  // Entity filter is already initialized by run() in cli/src/index.ts.
+  // Auth token
+  const token = (opts.authToken ?? opts["auth-token"]) as string | undefined;
+  if (token) {
+    setAuthToken(token);
+    console.log("Auth token required for API requests.");
+  }
 
-  // 1. Initialize entity store (triggers table creation)
+  // Import entities from CSV data sources (optional)
+  if (opts.importEntities || opts["import-entities"]) {
+    console.log("Importing entity data from CSV sources...");
+    const { importEntities } = await import("./import-entities");
+    await importEntities({ force: !!(opts.reimportEntities || opts["reimport-entities"]) });
+  }
+
+  // Entity store stats
   const stats = entityStoreStats();
   console.log(`Entity store: ${stats.entities} entities, ${stats.addresses} addresses, ${stats.addressLabels} address labels, ${stats.transactionLabels} tx labels.`);
 
-  // 2. Register routes
+  // Register routes
   clearRoutes();
 
   // Analysis
@@ -66,7 +78,7 @@ export async function startApiServer(opts: GlobalOpts): Promise<void> {
   addRoute("DELETE", "/api/v1/transactions/:txid/label", handleDeleteTransactionLabel);
   addRoute("POST", "/api/v1/lookup/transactions", handleLookupTransactions);
 
-  // 3. Start HTTP server
+  // Start HTTP server
   const server = createServer(handleRequest);
 
   await new Promise<void>((resolve, reject) => {

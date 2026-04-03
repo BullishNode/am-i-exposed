@@ -105,6 +105,14 @@ export function sendError(res: ServerResponse, status: number, message: string):
   sendJson(res, status, { error: true, message });
 }
 
+/** Auth token. Null = no auth required. */
+let authToken: string | null = null;
+
+/** Set the required auth token. Requests must send Authorization: Bearer <token>. */
+export function setAuthToken(token: string | null): void {
+  authToken = token;
+}
+
 /** Main request handler - matches routes and dispatches. */
 export async function handleRequest(
   req: IncomingMessage,
@@ -114,8 +122,8 @@ export async function handleRequest(
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
     });
     res.end();
     return;
@@ -123,6 +131,15 @@ export async function handleRequest(
 
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
   const pathname = url.pathname;
+
+  // Auth check (health endpoint is always public)
+  if (authToken && pathname !== "/api/v1/health") {
+    const header = req.headers.authorization ?? "";
+    if (header !== `Bearer ${authToken}`) {
+      sendError(res, 401, "Unauthorized");
+      return;
+    }
+  }
   const method = (req.method ?? "GET").toUpperCase();
 
   for (const route of routes) {

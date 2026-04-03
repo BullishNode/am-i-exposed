@@ -145,6 +145,9 @@ program
   .description("Start HTTP API server for programmatic access")
   .option("--port <N>", "Port to listen on", "3001")
   .option("--host <addr>", "Bind address", "127.0.0.1")
+  .option("--auth-token <token>", "Require Bearer token for API requests")
+  .option("--import-entities", "Import entity data from CSV sources into SQLite on startup")
+  .option("--reimport-entities", "Force re-import even if entities already exist")
   .action(async (opts: Record<string, string>) => {
     const { startApiServer } = await import("./server/index");
     await run(() => startApiServer(mergeOpts(opts)));
