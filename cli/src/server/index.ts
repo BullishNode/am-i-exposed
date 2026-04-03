@@ -24,7 +24,7 @@ import {
   handleGetTransactionLabel, handleSetTransactionLabel,
   handleDeleteTransactionLabel, handleLookupTransactions,
 } from "./handlers/transactions";
-import { entityStoreStats, lookupAddressEntity, getAddressLabel } from "../adapters/entity-store";
+import { entityStoreStats, getKnownAddress } from "../adapters/entity-store";
 import { setSupplementaryEntityChecker } from "@/lib/analysis/entity-filter/entity-match";
 import type { GlobalOpts } from "../index";
 
@@ -50,46 +50,30 @@ export async function startApiServer(opts: GlobalOpts): Promise<void> {
 
   // Entity store stats
   const stats = entityStoreStats();
-  console.log(`Entity store: ${stats.entities} entities, ${stats.addresses} addresses, ${stats.addressLabels} address labels, ${stats.transactionLabels} tx labels.`);
+  console.log(`Store: ${stats.entities} entities, ${stats.knownAddresses} known addresses (${stats.withEntity} with entity, ${stats.withLabel} with label), ${stats.transactionLabels} tx labels.`);
 
-  // Register custom checker so matchEntitySync() also checks our SQLite store.
-  // Checks entity addresses first, then address labels as fallback.
-  // This makes both custom entities AND labeled addresses appear on graph nodes,
+  // Register supplementary checker — queries known_addresses table.
+  // Makes custom entities and labeled addresses visible on graph nodes,
   // in entity detection findings, and in chain trace results.
   setSupplementaryEntityChecker((address: string) => {
-    // Check entity addresses first
-    const entityHit = lookupAddressEntity(address);
-    if (entityHit) {
-      return {
-        address,
-        entityName: entityHit.entityName,
-        category: entityHit.category as import("@/lib/analysis/entities").EntityCategory,
-        ofac: false,
-        confidence: "high" as const,
-      };
+    const hit = getKnownAddress(address);
+    if (!hit) return null;
+    // Determine display name: entity name > label (truncated) > category
+    let displayName = hit.category;
+    if (hit.entityName) displayName = hit.entityName;
+    else if (hit.label) {
+      try { const p = JSON.parse(hit.label); if (p.category) displayName = p.category; } catch { /* use raw */ }
+      if (displayName === hit.category && hit.label.length <= 40) displayName = hit.label;
     }
-    // Check address labels as fallback
-    const labelHit = getAddressLabel(address);
-    if (labelHit) {
-      // Parse label as JSON if possible to extract category
-      let category = "flagged";
-      try {
-        const parsed = JSON.parse(labelHit.label);
-        if (parsed.category) category = parsed.category;
-      } catch {
-        // Plain text label — use as-is
-      }
-      return {
-        address,
-        entityName: labelHit.label.length > 40 ? labelHit.label.slice(0, 40) + "..." : labelHit.label,
-        category: category as import("@/lib/analysis/entities").EntityCategory,
-        ofac: false,
-        confidence: "medium" as const,
-      };
-    }
-    return null;
+    return {
+      address,
+      entityName: displayName,
+      category: hit.category as import("@/lib/analysis/entities").EntityCategory,
+      ofac: false,
+      confidence: hit.entityId ? "high" as const : "medium" as const,
+    };
   });
-  console.log("Custom entity + label checker registered.");
+  console.log("Known address checker registered.");
 
   // Register routes
   clearRoutes();

@@ -11,8 +11,8 @@
 import type { MempoolTransaction } from "@/lib/api/types";
 import type { TraceLayer } from "@/lib/analysis/chain/recursive-trace";
 import {
-  lookupAddressEntities, lookupAddressLabels, lookupTransactionLabels,
-  type StoredAddressEntity, type StoredAddressLabel, type StoredTransactionLabel,
+  lookupKnownAddresses, lookupTransactionLabels,
+  type KnownAddress,
 } from "../adapters/entity-store";
 
 export interface CustomEntityHit {
@@ -132,44 +132,48 @@ export function enrichFromStore(
     }
   }
 
-  // 2. Batch lookup against entity store
+  // 2. Batch lookup against known_addresses (one query for both entities + labels)
   const addrArray = [...allAddresses];
   const txidArray = [...allTxids];
-  const entityHits = lookupAddressEntities(addrArray);
-  const addrLabelHits = lookupAddressLabels(addrArray);
+  const knownHits = lookupKnownAddresses(addrArray);
   const txLabelHits = lookupTransactionLabels(txidArray);
 
-  // 3. Build results
+  // 3. Build results — split known addresses into entities and labels
   const customEntities: CustomEntityHit[] = [];
+  const addressLabels: AddressLabelHit[] = [];
   const seenEntities = new Set<string>();
-  for (const [addr, entity] of entityHits) {
+
+  for (const [addr, known] of knownHits) {
     const meta = addressHops.get(addr);
     if (!meta) continue;
-    const key = `${addr}:${meta.direction}`;
-    if (seenEntities.has(key)) continue;
-    seenEntities.add(key);
-    customEntities.push({
-      entityName: entity.entityName,
-      category: entity.category,
-      address: addr,
-      txid: meta.txid,
-      direction: meta.direction,
-      hops: meta.hops,
-    });
+
+    // If has entity → custom entity hit
+    if (known.entityId && known.entityName) {
+      const key = `${addr}:${meta.direction}`;
+      if (!seenEntities.has(key)) {
+        seenEntities.add(key);
+        customEntities.push({
+          entityName: known.entityName,
+          category: known.category,
+          address: addr,
+          txid: meta.txid,
+          direction: meta.direction,
+          hops: meta.hops,
+        });
+      }
+    }
+
+    // If has label → address label hit
+    if (known.label) {
+      addressLabels.push({
+        address: addr,
+        label: known.label,
+        hops: meta.hops,
+        direction: meta.direction,
+      });
+    }
   }
   customEntities.sort((a, b) => a.hops - b.hops);
-
-  const addressLabels: AddressLabelHit[] = [];
-  for (const [addr, lbl] of addrLabelHits) {
-    const meta = addressHops.get(addr);
-    if (!meta) continue;
-    addressLabels.push({
-      address: addr,
-      label: lbl.label,
-      hops: meta.hops,
-      direction: meta.direction,
-    });
-  }
   addressLabels.sort((a, b) => a.hops - b.hops);
 
   const transactionLabels: TransactionLabelHit[] = [];

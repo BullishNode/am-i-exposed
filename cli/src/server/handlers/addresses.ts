@@ -6,9 +6,8 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { parseJsonBody, sendJson, sendError } from "../router";
 import { parseRawBody } from "../router";
 import {
-  lookupAddressEntity, getAddressLabel, setAddressLabel,
-  removeAddressLabel, lookupAddressEntities, lookupAddressLabels,
-  bulkSetAddressLabels,
+  getKnownAddress, setAddressLabel, removeAddressLabel,
+  lookupKnownAddresses, bulkAddKnownAddresses,
 } from "../../adapters/entity-store";
 
 /** GET /api/v1/addresses/:addr */
@@ -17,12 +16,14 @@ export async function handleGetAddress(
 ): Promise<void> {
   const addr = params.addr;
   if (!addr) { sendError(res, 400, "Missing address"); return; }
-  const entity = lookupAddressEntity(addr);
-  const label = getAddressLabel(addr);
+  const known = getKnownAddress(addr);
   sendJson(res, 200, {
     address: addr,
-    entity: entity ? { id: entity.entityId, name: entity.entityName, category: entity.category } : null,
-    label: label?.label ?? null,
+    entity: known?.entityId ? { id: known.entityId, name: known.entityName, category: known.category } : null,
+    label: known?.label ?? null,
+    category: known?.category ?? null,
+    source: known?.source ?? null,
+    confidence: known?.confidence ?? null,
   });
 }
 
@@ -57,18 +58,16 @@ export async function handleLookupAddresses(
     sendError(res, 400, "Required field: addresses (string array)");
     return;
   }
-  const entities = lookupAddressEntities(body.addresses);
-  const labels = lookupAddressLabels(body.addresses);
-  const results: Record<string, { entity: { id: number; name: string; category: string } | null; label: string | null }> = {};
-  for (const addr of body.addresses) {
-    const ent = entities.get(addr);
-    const lbl = labels.get(addr);
-    if (ent || lbl) {
-      results[addr] = {
-        entity: ent ? { id: ent.entityId, name: ent.entityName, category: ent.category } : null,
-        label: lbl?.label ?? null,
-      };
-    }
+  const known = lookupKnownAddresses(body.addresses);
+  const results: Record<string, { entity: { id: number; name: string; category: string } | null; label: string | null; category: string; source: string; confidence: number }> = {};
+  for (const [addr, k] of known) {
+    results[addr] = {
+      entity: k.entityId ? { id: k.entityId, name: k.entityName!, category: k.category } : null,
+      label: k.label,
+      category: k.category,
+      source: k.source,
+      confidence: k.confidence,
+    };
   }
   sendJson(res, 200, { results });
 }
@@ -87,7 +86,8 @@ export async function handleBulkImportLabels(
     }
     const valid = body.labels.filter((l) => l.address && l.label);
     if (valid.length === 0) { sendError(res, 400, "No valid labels"); return; }
-    const count = bulkSetAddressLabels(valid);
+    const rows = valid.map((l) => ({ address: l.address, label: l.label, category: "flagged", source: "import" }));
+    const count = bulkAddKnownAddresses(rows);
     sendJson(res, 200, { imported: count, total: body.labels.length, invalid: body.labels.length - valid.length });
     return;
   }
@@ -100,35 +100,33 @@ export async function handleBulkImportLabels(
   let startLine = 0;
   if (lines[0].toLowerCase().includes("address")) startLine = 1;
 
-  const labels: Array<{ address: string; label: string }> = [];
+  const rows: Array<{ address: string; label?: string; category?: string; source?: string; confidence?: number }> = [];
   let errors = 0;
 
   for (let i = startLine; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line || line.startsWith("#")) continue;
 
-    // Handle CSV with quoted fields (description may contain commas)
     const parts = parseCSVLine(line);
     const address = parts[0]?.trim();
     if (!address || address.length < 26) { errors++; continue; }
 
-    // If it looks like the blacklist CSV (7 columns), build structured label
+    // Blacklist CSV format (7 columns): address,source,network,category,confidence_score,description,is_active
     if (parts.length >= 5) {
-      const source = parts[1]?.trim() || "";
-      const category = parts[3]?.trim() || "";
-      const confidence = parts[4]?.trim() || "";
+      const source = parts[1]?.trim() || "import";
+      const category = parts[3]?.trim() || "flagged";
+      const confidence = Number(parts[4]?.trim()) || 0;
       const description = parts[5]?.trim() || "";
-      const label = JSON.stringify({ category, source, confidence: Number(confidence) || 0, description });
-      labels.push({ address, label });
+      rows.push({ address, label: description || undefined, category, source, confidence });
     } else if (parts.length >= 2) {
-      labels.push({ address, label: parts[1]?.trim() || "" });
+      rows.push({ address, label: parts[1]?.trim() || undefined, category: "flagged", source: "import" });
     } else {
       errors++;
     }
   }
 
-  if (labels.length === 0) { sendJson(res, 200, { imported: 0, errors }); return; }
-  const count = bulkSetAddressLabels(labels);
+  if (rows.length === 0) { sendJson(res, 200, { imported: 0, errors }); return; }
+  const count = bulkAddKnownAddresses(rows);
   sendJson(res, 200, { imported: count, errors });
 }
 
