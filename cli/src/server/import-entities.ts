@@ -85,7 +85,7 @@ export async function importEntities(opts?: { force?: boolean }): Promise<void> 
   // Skip if built-in entities already imported (custom entities via API don't block this)
   const stats = entityStoreStats();
   if (stats.entities >= entityDefs.length && !opts?.force) {
-    console.log(`  Already imported (${stats.entities} entities, ${stats.addresses} addresses). Use --reimport-entities to force.`);
+    console.log(`  Already imported (${stats.entities} entities, ${stats.knownAddresses} known addresses). Use --reimport-entities to force.`);
     return;
   }
 
@@ -157,7 +157,7 @@ export async function importEntities(opts?: { force?: boolean }): Promise<void> 
   console.log(`  Import complete: ${totalFiles} files, ${totalAddresses} addresses imported.`);
   if (totalSkipped > 0) console.log(`  Skipped ${totalSkipped} addresses (entity not in entities.json).`);
   if (totalInvalid > 0) console.log(`  Invalid ${totalInvalid} lines (bad format or address).`);
-  console.log(`  Entity store: ${finalStats.entities} entities, ${finalStats.addresses} addresses.`);
+  console.log(`  Entity store: ${finalStats.entities} entities, ${finalStats.knownAddresses} known addresses.`);
 }
 
 /**

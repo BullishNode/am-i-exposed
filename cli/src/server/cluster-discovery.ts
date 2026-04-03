@@ -8,8 +8,8 @@
  */
 
 import {
-  lookupAddressEntities, addAddressesToEntity,
-  type StoredAddressEntity,
+  lookupKnownAddresses, addAddressesToEntity,
+  type KnownAddress,
 } from "../adapters/entity-store";
 
 /** Maximum cluster size for auto-discovery. Larger clusters are reported but not persisted. */
@@ -41,18 +41,23 @@ export function discoverClusterEntities(
 
   const addrArray = [...clusterAddresses];
 
-  // 1. Check all cluster addresses against entity store
-  const entityHits = lookupAddressEntities(addrArray);
+  // 1. Check all cluster addresses against known_addresses store
+  const knownHits = lookupKnownAddresses(addrArray);
+  // Filter to only addresses that have an entity
+  const entityHits = new Map<string, KnownAddress>();
+  for (const [addr, known] of knownHits) {
+    if (known.entityId) entityHits.set(addr, known);
+  }
   if (entityHits.size === 0) return [];
 
   // 2. Group by entity ID
-  const byEntity = new Map<number, { entity: StoredAddressEntity; knownAddresses: string[] }>();
-  for (const [addr, entity] of entityHits) {
-    const existing = byEntity.get(entity.entityId);
+  const byEntity = new Map<number, { entity: KnownAddress; knownAddresses: string[] }>();
+  for (const [addr, known] of entityHits) {
+    const existing = byEntity.get(known.entityId!);
     if (existing) {
       existing.knownAddresses.push(addr);
     } else {
-      byEntity.set(entity.entityId, { entity, knownAddresses: [addr] });
+      byEntity.set(known.entityId!, { entity: known, knownAddresses: [addr] });
     }
   }
 
@@ -89,7 +94,7 @@ export function discoverClusterEntities(
     }
 
     discoveries.push({
-      entityName: entity.entityName,
+      entityName: entity.entityName ?? "Unknown",
       entityId,
       category: entity.category,
       knownAddresses,
