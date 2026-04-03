@@ -138,6 +138,18 @@ program
     await startMcpServer();
   });
 
+// ---- HTTP API server ----
+
+program
+  .command("serve")
+  .description("Start HTTP API server for programmatic access")
+  .option("--port <N>", "Port to listen on", "3001")
+  .option("--host <addr>", "Bind address", "127.0.0.1")
+  .action(async (opts: Record<string, string>) => {
+    const { startApiServer } = await import("./server/index");
+    await run(() => startApiServer(mergeOpts(opts)));
+  });
+
 // ---- cache management ----
 
 const cache = program
