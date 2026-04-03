@@ -18,13 +18,13 @@ import {
 } from "./handlers/entities";
 import {
   handleGetAddress, handleSetAddressLabel, handleDeleteAddressLabel,
-  handleLookupAddresses,
+  handleLookupAddresses, handleBulkImportLabels,
 } from "./handlers/addresses";
 import {
   handleGetTransactionLabel, handleSetTransactionLabel,
   handleDeleteTransactionLabel, handleLookupTransactions,
 } from "./handlers/transactions";
-import { entityStoreStats, lookupAddressEntity } from "../adapters/entity-store";
+import { entityStoreStats, lookupAddressEntity, getAddressLabel } from "../adapters/entity-store";
 import { setSupplementaryEntityChecker } from "@/lib/analysis/entity-filter/entity-match";
 import type { GlobalOpts } from "../index";
 
@@ -52,22 +52,44 @@ export async function startApiServer(opts: GlobalOpts): Promise<void> {
   const stats = entityStoreStats();
   console.log(`Entity store: ${stats.entities} entities, ${stats.addresses} addresses, ${stats.addressLabels} address labels, ${stats.transactionLabels} tx labels.`);
 
-  // Register custom entity checker so matchEntitySync() also checks our SQLite store.
-  // This makes custom entities appear everywhere: graph nodes, entity detection, findings.
-  if (stats.addresses > 0) {
-    setSupplementaryEntityChecker((address: string) => {
-      const hit = lookupAddressEntity(address);
-      if (!hit) return null;
+  // Register custom checker so matchEntitySync() also checks our SQLite store.
+  // Checks entity addresses first, then address labels as fallback.
+  // This makes both custom entities AND labeled addresses appear on graph nodes,
+  // in entity detection findings, and in chain trace results.
+  setSupplementaryEntityChecker((address: string) => {
+    // Check entity addresses first
+    const entityHit = lookupAddressEntity(address);
+    if (entityHit) {
       return {
         address,
-        entityName: hit.entityName,
-        category: hit.category as import("@/lib/analysis/entities").EntityCategory,
+        entityName: entityHit.entityName,
+        category: entityHit.category as import("@/lib/analysis/entities").EntityCategory,
         ofac: false,
         confidence: "high" as const,
       };
-    });
-    console.log("Custom entity checker registered.");
-  }
+    }
+    // Check address labels as fallback
+    const labelHit = getAddressLabel(address);
+    if (labelHit) {
+      // Parse label as JSON if possible to extract category
+      let category = "flagged";
+      try {
+        const parsed = JSON.parse(labelHit.label);
+        if (parsed.category) category = parsed.category;
+      } catch {
+        // Plain text label — use as-is
+      }
+      return {
+        address,
+        entityName: labelHit.label.length > 40 ? labelHit.label.slice(0, 40) + "..." : labelHit.label,
+        category: category as import("@/lib/analysis/entities").EntityCategory,
+        ofac: false,
+        confidence: "medium" as const,
+      };
+    }
+    return null;
+  });
+  console.log("Custom entity + label checker registered.");
 
   // Register routes
   clearRoutes();
@@ -89,6 +111,7 @@ export async function startApiServer(opts: GlobalOpts): Promise<void> {
   addRoute("DELETE", "/api/v1/entities/:id/addresses/:addr", handleRemoveAddress);
 
   // Address labels + lookup
+  addRoute("POST", "/api/v1/addresses/labels/import", handleBulkImportLabels);
   addRoute("GET", "/api/v1/addresses/:addr", handleGetAddress);
   addRoute("PUT", "/api/v1/addresses/:addr/label", handleSetAddressLabel);
   addRoute("DELETE", "/api/v1/addresses/:addr/label", handleDeleteAddressLabel);

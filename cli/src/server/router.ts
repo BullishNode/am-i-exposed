@@ -44,7 +44,7 @@ export function addRoute(method: string, path: string, handler: Handler): void {
 }
 
 /** Maximum request body size (10 MB). */
-const MAX_BODY_SIZE = 10 * 1024 * 1024;
+const MAX_BODY_SIZE = 50 * 1024 * 1024;
 
 /** Read raw body bytes from request with size limit. */
 function readBody(req: IncomingMessage): Promise<Buffer | null> {

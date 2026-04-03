@@ -317,6 +317,26 @@ export function lookupAddressLabels(addresses: string[]): Map<string, StoredAddr
   return results;
 }
 
+export function bulkSetAddressLabels(labels: Array<{ address: string; label: string }>, source = "import"): number {
+  const d = getDb();
+  if (!d || labels.length === 0) return 0;
+  const now = Date.now();
+  const stmt = d.prepare(
+    "INSERT OR REPLACE INTO address_labels (address, label, source, created_at) VALUES (?, ?, ?, ?)",
+  );
+  let count = 0;
+  const tx = d.transaction(() => {
+    for (const { address, label } of labels) {
+      if (address && label) {
+        stmt.run(address, label, source, now);
+        count++;
+      }
+    }
+  });
+  tx();
+  return count;
+}
+
 // ── Transaction Labels ──
 
 export function setTransactionLabel(txid: string, label: string, source?: string): void {

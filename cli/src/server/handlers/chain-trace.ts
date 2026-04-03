@@ -18,7 +18,6 @@ import { buildParentTxsByIdx, buildChildTxsByIdx, buildTxsByAddress } from "@/li
 import { enrichFindingsWithMetadata } from "@/lib/analysis/finding-metadata";
 import { matchEntitySync } from "@/lib/analysis/entity-filter/entity-match";
 import { enrichFromStore } from "../enrich";
-import { discoverClusterEntities } from "../cluster-discovery";
 import { createClient } from "../../util/api";
 import type { Finding } from "@/lib/types";
 
@@ -104,7 +103,6 @@ export async function handleChainTrace(
 
   const findings: Finding[] = [];
   let coinJoinInputIndices: number[] = [];
-  let clusterDiscoveries: unknown[] = [];
 
   // 1. Backward analysis
   if (doBackward && parentTxsByIdx.size > 0) {
@@ -120,7 +118,6 @@ export async function handleChainTrace(
   }
 
   // 3. Address clustering
-  let clusterAddresses: Set<string> | null = null;
   const hasTraceLayers = backwardResult.layers.length > 0 || forwardResult.layers.length > 0;
   if (hasTraceLayers) {
     const txsByAddress = buildTxsByAddress(tx, backwardResult.layers, forwardResult.layers);
@@ -128,7 +125,6 @@ export async function handleChainTrace(
     if (seedAddr) {
       const clusterResult = buildCluster(seedAddr, txsByAddress);
       findings.push(...clusterResult.findings);
-      clusterAddresses = clusterResult.clusterAddresses;
     }
   }
 
@@ -164,11 +160,6 @@ export async function handleChainTrace(
   // Enrich findings with metadata
   enrichFindingsWithMetadata(findings);
 
-  // Cluster-entity cross-reference
-  if (clusterAddresses && clusterAddresses.size > 1) {
-    clusterDiscoveries = discoverClusterEntities(clusterAddresses);
-  }
-
   // Custom entities, address labels, transaction labels
   const enrichment = enrichFromStore(tx, backwardResult.layers, forwardResult.layers);
 
@@ -193,6 +184,5 @@ export async function handleChainTrace(
     customEntities: enrichment.customEntities,
     addressLabels: enrichment.addressLabels,
     transactionLabels: enrichment.transactionLabels,
-    clusterDiscoveries,
   });
 }

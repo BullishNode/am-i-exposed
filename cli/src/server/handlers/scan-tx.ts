@@ -25,7 +25,6 @@ import { enrichFindingsWithMetadata } from "@/lib/analysis/finding-metadata";
 import { TX_BASE_SCORE } from "@/lib/scoring/score";
 import { matchEntitySync } from "@/lib/analysis/entity-filter/entity-match";
 import { enrichFromStore } from "../enrich";
-import { discoverClusterEntities } from "../cluster-discovery";
 import { createClient } from "../../util/api";
 import type { Finding } from "@/lib/types";
 
@@ -101,7 +100,6 @@ export async function handleScanTx(
   // Chain analysis
   let chainAnalysis: unknown = null;
   let enrichment = { customEntities: [] as unknown[], addressLabels: [] as unknown[], transactionLabels: [] as unknown[] };
-  let clusterDiscoveries: unknown[] = [];
 
   if (chainDepth > 0) {
     const backwardResult = await traceBackward(tx, chainDepth, minSats, client);
@@ -136,7 +134,6 @@ export async function handleScanTx(
     }
 
     // 3. Address clustering (CIOH)
-    let clusterAddresses: Set<string> | null = null;
     const hasTraceLayers = backwardResult.layers.length > 0 || forwardResult.layers.length > 0;
     if (hasTraceLayers) {
       const txsByAddress = buildTxsByAddress(tx, backwardResult.layers, forwardResult.layers);
@@ -144,7 +141,6 @@ export async function handleScanTx(
       if (seedAddr) {
         const clusterResult = buildCluster(seedAddr, txsByAddress);
         chainFindings.push(...clusterResult.findings);
-        clusterAddresses = clusterResult.clusterAddresses;
       }
     }
 
@@ -178,11 +174,6 @@ export async function handleScanTx(
     // Enrich all findings with metadata (adversary tiers, temporality)
     result.findings.push(...chainFindings);
     enrichFindingsWithMetadata(result.findings);
-
-    // Cluster-entity cross-reference + auto-discovery
-    if (clusterAddresses && clusterAddresses.size > 1) {
-      clusterDiscoveries = discoverClusterEntities(clusterAddresses);
-    }
 
     chainAnalysis = {
       backward: {
@@ -238,7 +229,6 @@ export async function handleScanTx(
     customEntities: enrichment.customEntities,
     addressLabels: enrichment.addressLabels,
     transactionLabels: enrichment.transactionLabels,
-    clusterDiscoveries,
   });
 }
 
