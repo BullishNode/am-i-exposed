@@ -106,11 +106,11 @@ export async function handleScanTx(
     const known = lookupKnownAddresses(inputAddrs);
     const newAddrs = inputAddrs.filter((a) => {
       const existing = known.get(a);
-      return !existing || existing.confidence < 40;
+      return !existing || existing.confidence < 20;
     });
     if (newAddrs.length > 0) {
       bulkAddKnownAddresses(newAddrs.map((a) => ({
-        address: a, category: "exchange", source: "pattern-detection", confidence: 40,
+        address: a, category: "exchange", source: "pattern-detection", confidence: 20,
       })));
     }
   }
