@@ -33,6 +33,7 @@ interface ScanTxBody {
   network?: string;
   apiUrl?: string;
   chainDepth?: number;
+  direction?: "backward" | "forward" | "both";
   minSats?: number;
   fast?: boolean;
 }
@@ -49,6 +50,7 @@ export async function handleScanTx(
 
   const { txid, network, apiUrl, fast } = body;
   const chainDepth = Math.max(0, Math.min(Number(body.chainDepth ?? 6), 20));
+  const direction = body.direction ?? "both";
   const minSats = Math.max(0, Number(body.minSats ?? 1000));
 
   if (!/^[0-9a-fA-F]{64}$/.test(txid)) {
@@ -59,6 +61,12 @@ export async function handleScanTx(
   const validNetworks = ["mainnet", "testnet4", "signet"];
   if (network && !validNetworks.includes(network)) {
     sendError(res, 400, `Invalid network: must be one of ${validNetworks.join(", ")}`);
+    return;
+  }
+
+  const validDirections = ["backward", "forward", "both"];
+  if (!validDirections.includes(direction)) {
+    sendError(res, 400, `Invalid direction: must be one of ${validDirections.join(", ")}`);
     return;
   }
 
@@ -101,9 +109,16 @@ export async function handleScanTx(
   let chainAnalysis: unknown = null;
   let enrichment = { customEntities: [] as unknown[], addressLabels: [] as unknown[], transactionLabels: [] as unknown[] };
 
+  const doBackward = direction === "backward" || direction === "both";
+  const doForward = direction === "forward" || direction === "both";
+
   if (chainDepth > 0) {
-    const backwardResult = await traceBackward(tx, chainDepth, minSats, client);
-    const forwardResult = await traceForward(tx, chainDepth, minSats, client);
+    const backwardResult = doBackward
+      ? await traceBackward(tx, chainDepth, minSats, client)
+      : { layers: [], allTxs: new Map<string, MempoolTransaction>(), fetchCount: 0, aborted: false };
+    const forwardResult = doForward
+      ? await traceForward(tx, chainDepth, minSats, client)
+      : { layers: [], allTxs: new Map<string, MempoolTransaction>(), fetchCount: 0, aborted: false };
 
     // Fetch outspends (needed for forward analysis + spending patterns)
     let outspends: import("@/lib/api/types").MempoolOutspend[] | null = null;
@@ -164,8 +179,10 @@ export async function handleScanTx(
       const match = matchEntitySync(addr);
       return match ? { category: match.category, entityName: match.entityName } : null;
     };
-    const taintResult = analyzeBackwardTaint(tx, backwardResult.layers, entityChecker);
-    chainFindings.push(...taintResult.findings);
+    if (doBackward) {
+      const taintResult = analyzeBackwardTaint(tx, backwardResult.layers, entityChecker);
+      chainFindings.push(...taintResult.findings);
+    }
 
     // 7. Linkability matrix
     const linkResult = buildLinkabilityMatrix(tx);
@@ -176,18 +193,18 @@ export async function handleScanTx(
     enrichFindingsWithMetadata(result.findings);
 
     chainAnalysis = {
-      backward: {
+      backward: doBackward ? {
         depth: chainDepth,
         txsFetched: backwardResult.fetchCount,
         aborted: backwardResult.aborted,
         layers: backwardResult.layers.map((l) => ({ depth: l.depth, txCount: l.txs.size })),
-      },
-      forward: {
+      } : null,
+      forward: doForward ? {
         depth: chainDepth,
         txsFetched: forwardResult.fetchCount,
         aborted: forwardResult.aborted,
         layers: forwardResult.layers.map((l) => ({ depth: l.depth, txCount: l.txs.size })),
-      },
+      } : null,
       findings: chainFindings,
     };
 
