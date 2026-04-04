@@ -25,7 +25,6 @@ import { enrichFindingsWithMetadata } from "@/lib/analysis/finding-metadata";
 import { TX_BASE_SCORE } from "@/lib/scoring/score";
 import { matchEntitySync } from "@/lib/analysis/entity-filter/entity-match";
 import { enrichFromStore } from "../enrich";
-import { lookupKnownAddresses, bulkAddKnownAddresses } from "../../adapters/entity-store";
 import { createClient } from "../../util/api";
 import type { Finding } from "@/lib/types";
 
@@ -97,23 +96,6 @@ export async function handleScanTx(
 
   // Run heuristic analysis (27 tx heuristics)
   const result = await analyzeTransaction(tx, rawHex, undefined, ctx);
-
-  // Persist exchange pattern detections: tag input addresses as exchange hot wallets
-  if (result.findings.some((f) => f.id === "exchange-withdrawal-pattern")) {
-    const inputAddrs = tx.vin
-      .filter((v) => !v.is_coinbase && v.prevout?.scriptpubkey_address)
-      .map((v) => v.prevout!.scriptpubkey_address!);
-    const known = lookupKnownAddresses(inputAddrs);
-    const newAddrs = inputAddrs.filter((a) => {
-      const existing = known.get(a);
-      return !existing || existing.confidence < 20;
-    });
-    if (newAddrs.length > 0) {
-      bulkAddKnownAddresses(newAddrs.map((a) => ({
-        address: a, category: "exchange", source: "pattern-detection", confidence: 20,
-      })));
-    }
-  }
 
   // Chain analysis
   let chainAnalysis: unknown = null;
